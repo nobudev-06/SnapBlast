@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+	<TargetFramework>net10.0</TargetFramework>
+	<IsTestProject>true</IsTestProject>
+	<IsPackable>false</IsPackable>
+	<Nullable>enable</Nullable>
+	<ImplicitUsings>enable</ImplicitUsings>
+		<!-- Keep Windows SDK packaging targets numeric when this platform-neutral test project is loaded with the MAUI solution. -->
+		<TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+	  <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+	<Compile Include="Models\QuizModels.cs" Link="Models\QuizModels.cs" />
+	<Compile Include="Game\ExactFitLayoutGenerator.cs" Link="Game\ExactFitLayoutGenerator.cs" />
+	<Compile Include="Game\PuzzleEngine.cs" Link="Game\PuzzleEngine.cs" />
+	<Compile Include="Tests\ExactFitLayoutTests.cs" Link="Tests\ExactFitLayoutTests.cs" />
+	<PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
+	<PackageReference Include="xunit" Version="2.9.3" />
+	<PackageReference Include="xunit.runner.visualstudio" Version="3.0.2">
+	  <PrivateAssets>all</PrivateAssets>
+	  <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+	</PackageReference>
+  </ItemGroup>
+</Project>

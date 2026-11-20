@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="SnapBlast.csproj">
+    <Deploy Solution="Debug|*" />
+  </Project>
+  <Project Path="SnapBlast.Tests.csproj" />
+</Solution>

@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="SnapBlast.Views.LoginPage"
+             Title="SnapBlast Login"
+             BackgroundColor="{StaticResource MacaronBackground}">
+    <VerticalStackLayout Padding="20,40" Spacing="20" VerticalOptions="CenterAndExpand">
+        <!-- Header -->
+        <VerticalStackLayout HorizontalOptions="Center" Spacing="8">
+            <Label Text="SNAPBLAST" FontSize="28" CharacterSpacing="3" TextColor="{StaticResource Primary}" HorizontalOptions="Center" FontAttributes="Bold" />
+            <Label Text="Study smarter, remember better" FontSize="14" TextColor="#6B7280" HorizontalOptions="Center" />
+        </VerticalStackLayout>
+
+        <!-- Login/Register Form -->
+        <Border Padding="20" StrokeShape="RoundRectangle 16" BackgroundColor="{StaticResource MacaronMint}" BorderColor="Transparent">
+            <VerticalStackLayout Spacing="14">
+                <!-- Toggle between Login/Register -->
+                <HorizontalStackLayout HorizontalOptions="Center" Spacing="10">
+                    <Button Text="Sign In" 
+                            Command="{Binding SwitchToLoginCommand}" 
+                            BackgroundColor="{Binding IsRegisterMode, Converter={StaticResource InvertedBoolConverter}, ConverterParameter='{StaticResource Primary},{StaticResource MacaronButter}'}"
+                            TextColor="White"
+                            Padding="16,8"
+                            FontAttributes="Bold"
+                            CornerRadius="20" />
+                    <Button Text="Register" 
+                            Command="{Binding SwitchToRegisterCommand}" 
+                            BackgroundColor="{Binding IsRegisterMode, Converter={StaticResource BoolConverter}, ConverterParameter='{StaticResource Primary},{StaticResource MacaronButter}'}"
+                            TextColor="White"
+                            Padding="16,8"
+                            FontAttributes="Bold"
+                            CornerRadius="20" />
+                </HorizontalStackLayout>
+
+                <BoxView Color="#D0D0D0" HeightRequest="1" />
+
+                <!-- Email -->
+                <Label Text="Email" FontAttributes="Bold" TextColor="{StaticResource MacaronInk}" FontSize="12" />
+                <Entry Text="{Binding Email}" 
+                       Placeholder="your.email@example.com" 
+                       Keyboard="Email"
+                       PlaceholderColor="#B0B0B0" />
+
+                <!-- Display Name (Register only) -->
+                <VerticalStackLayout IsVisible="{Binding IsRegisterMode}" Spacing="8">
+                    <Label Text="Display Name" FontAttributes="Bold" TextColor="{StaticResource MacaronInk}" FontSize="12" />
+                    <Entry Text="{Binding DisplayName}" 
+                           Placeholder="Your name" 
+                           PlaceholderColor="#B0B0B0" />
+                </VerticalStackLayout>
+
+                <!-- Password -->
+                <Label Text="Password" FontAttributes="Bold" TextColor="{StaticResource MacaronInk}" FontSize="12" />
+                <Entry Text="{Binding Password}" 
+                       Placeholder="••••••••" 
+                       IsPassword="True"
+                       PlaceholderColor="#B0B0B0" />
+
+                <!-- Error/Status Message -->
+                <Label Text="{Binding StatusMessage}" 
+                       TextColor="#DC2626" 
+                       FontSize="12"
+                       LineBreakMode="WordWrap"
+                       IsVisible="{Binding StatusMessage, Converter={StaticResource InvertedBoolConverter}}" />
+
+                <!-- Submit Button -->
+                <Button Text="{Binding IsRegisterMode, StringFormat='{0:??Register Account??Sign In??}'}" 
+                        Command="{Binding AuthenticateCommand}"
+                        BackgroundColor="{StaticResource Primary}"
+                        TextColor="White"
+                        Padding="0,14"
+                        FontAttributes="Bold"
+                        CornerRadius="10" />
+
+                <!-- Loading Indicator -->
+                <ActivityIndicator IsRunning="{Binding IsBusy}" 
+                                   IsVisible="{Binding IsBusy}"
+                                   Color="{StaticResource Primary}" />
+            </VerticalStackLayout>
+        </Border>
+
+        <!-- Info Text -->
+        <Label Text="Create a free account or sign in to your existing account to start creating and playing quizzes." 
+               FontSize="12" 
+               TextColor="#6B7280" 
+               LineBreakMode="WordWrap"
+               HorizontalTextAlignment="Center" />
+    </VerticalStackLayout>
+</ContentPage>

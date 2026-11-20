@@ -1,0 +1,22 @@
+# Never commit real API settings or credentials
+appsettings.json
+appsettings.*.json
+!appsettings.example.json
+
+# Local development secrets and OCR data
+secrets.json
+.env
+.env.*
+*.pem
+*.pfx
+
+# Tesseract local data can be large and machine-specific
+tessdata/
+
+# IDE/build output
+bin/
+obj/
+cd SnapBlast.Api
+
+dotnet user-secrets set "Gemini:ApiKey" "<new-google-ai-key>"
+dotnet user-secrets set "Mongo:ConnectionString" "mongodb+srv://mori388389_db_user:<new-password>@cluster0.o40ady2.mongodb.net/"

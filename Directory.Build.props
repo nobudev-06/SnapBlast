@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'SnapBlast.Tests'">
+	<MSBuildProjectExtensionsPath>$(MSBuildThisFileDirectory)obj\SnapBlast.Tests\</MSBuildProjectExtensionsPath>
+	<OutputPath>$(MSBuildThisFileDirectory)bin\SnapBlast.Tests\</OutputPath>
+  </PropertyGroup>
+</Project>

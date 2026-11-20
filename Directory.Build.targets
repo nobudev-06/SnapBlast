@@ -1,0 +1,6 @@
+<Project>
+  <!-- Visual Studio may load Windows SDK packaging targets for the platform-neutral test project. -->
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'SnapBlast.Tests'">
+	<TargetPlatformMinVersion Condition="'$(TargetPlatformMinVersion)' == ''">10.0.17763.0</TargetPlatformMinVersion>
+  </PropertyGroup>
+</Project>
