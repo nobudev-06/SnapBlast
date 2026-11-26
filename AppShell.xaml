@@ -3,6 +3,32 @@
     x:Class="SnapBlast.AppShell"
     xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
     xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    xmlns:app="clr-namespace:SnapBlast"
+    xmlns:views="clr-namespace:SnapBlast.Views"
+    Shell.FlyoutBehavior="Disabled"
+    Shell.NavBarIsVisible="False"
     Title="SnapBlast">
+
+    <!-- The FIRST ShellContent is what the app shows on launch. -->
+    <ShellContent
+        Title="Login"
+        ContentTemplate="{DataTemplate views:LoginPage}"
+        Route="login" />
+
+    <ShellContent
+        Title="Game Mode"
+        ContentTemplate="{DataTemplate views:GameModeSelectionPage}"
+        Route="gamemode_selection" />
+
+    <!-- MainPage lives in the SnapBlast namespace (not SnapBlast.Views), hence "app:" -->
+    <ShellContent
+        Title="Block Blast"
+        ContentTemplate="{DataTemplate app:MainPage}"
+        Route="blockblast" />
+
+    <ShellContent
+        Title="Multiple Choice"
+        ContentTemplate="{DataTemplate views:MultipleChoiceGamePage}"
+        Route="multiplechoice" />
 
 </Shell>

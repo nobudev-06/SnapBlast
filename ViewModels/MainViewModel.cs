@@ -59,18 +59,7 @@ public partial class MainViewModel : ObservableObject
     private bool isEditorVisible;
 
     [ObservableProperty]
-    private string email = string.Empty;
-
-    [ObservableProperty]
-    private string password = string.Empty;
-
-    [ObservableProperty]
-    private string displayName = string.Empty;
-
-    [ObservableProperty]
-    private string signedInAs = string.Empty;
-
-    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsNotBusy))]
     private bool isBusy;
 
     [ObservableProperty]
@@ -78,6 +67,8 @@ public partial class MainViewModel : ObservableObject
 
     [ObservableProperty]
     private int boardVersion;
+
+    public bool IsNotBusy => !IsBusy;
 
     public MainViewModel(QuizApiClient apiClient)
     {
@@ -97,50 +88,7 @@ public partial class MainViewModel : ObservableObject
     public ObservableCollection<PuzzleTile> Tiles { get; }
 
     [RelayCommand]
-    private async Task Login() => await Authenticate(false);
-
-    [RelayCommand]
-    private async Task Register() => await Authenticate(true);
-
-    [RelayCommand]
-    private void SignOut()
-    {
-        SecureStorage.Default.Remove("snapblast_access_token");
-        SignedInAs = string.Empty;
-        StatusMessage = "Signed out. Sign in before generating a quiz from a document.";
-    }
-
-    private async Task Authenticate(bool register)
-    {
-        if (IsBusy) return;
-        if (string.IsNullOrWhiteSpace(Email) || string.IsNullOrWhiteSpace(Password))
-        {
-            StatusMessage = "Enter an email and password first.";
-            return;
-        }
-
-        try
-        {
-            IsBusy = true;
-            StatusMessage = register ? "Creating your account..." : "Signing in...";
-            var result = await apiClient.AuthenticateAsync(Email.Trim(), Password, DisplayName.Trim(), register, CancellationToken.None);
-            SignedInAs = string.IsNullOrWhiteSpace(result.DisplayName) ? result.Email : result.DisplayName;
-            Password = string.Empty;
-            StatusMessage = $"Signed in as {SignedInAs}. You can now generate quizzes from documents.";
-        }
-        catch (HttpRequestException exception)
-        {
-            StatusMessage = $"Could not reach the API at {Configuration.ApiSettings.BaseUrl}: {exception.Message}";
-        }
-        catch (Exception exception)
-        {
-            StatusMessage = $"Authentication failed: {exception.Message}";
-        }
-        finally
-        {
-            IsBusy = false;
-        }
-    }
+    private Task BackToMenu() => Shell.Current.GoToAsync("//gamemode_selection");
 
     [RelayCommand]
     private void ToggleQuizEditor() => IsEditorVisible = !IsEditorVisible;
@@ -148,13 +96,10 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private async Task ImportQuizFromImage()
     {
+        if (IsBusy) return;
         try
         {
-            var file = await FilePicker.Default.PickAsync(new PickOptions
-            {
-                PickerTitle = "Choose a study sheet"
-            });
-
+            var file = await StudyFilePicker.PickAsync();
             if (file is null)
             {
                 return;
@@ -164,26 +109,17 @@ public partial class MainViewModel : ObservableObject
         }
         catch (Exception exception)
         {
-            StatusMessage = $"Could not open the image picker: {exception.Message}";
+            StatusMessage = $"Could not open the file picker: {exception.Message}";
         }
     }
 
     [RelayCommand]
     private async Task CaptureQuizImage()
     {
+        if (IsBusy) return;
         try
         {
-            if (!MediaPicker.Default.IsCaptureSupported)
-            {
-                StatusMessage = "Camera capture is not available on this device. Use Import study image instead.";
-                return;
-            }
-
-            var file = await MediaPicker.Default.CapturePhotoAsync(new MediaPickerOptions
-            {
-                Title = "Capture a study sheet"
-            });
-
+            var file = await StudyFilePicker.CaptureAsync();
             if (file is null)
             {
                 return;
@@ -197,7 +133,7 @@ public partial class MainViewModel : ObservableObject
         }
         catch (FeatureNotSupportedException)
         {
-            StatusMessage = "Camera capture is not supported on this device.";
+            StatusMessage = "Camera capture is not available on this device. Use Import image or PDF instead.";
         }
         catch (Exception exception)
         {
@@ -209,8 +145,12 @@ public partial class MainViewModel : ObservableObject
     {
         try
         {
+            IsBusy = true;
             StatusMessage = "Sending the document to Google AI for text extraction and quiz generation...";
-            var generated = await apiClient.GenerateQuizAsync(file, CustomQuizTitle, CancellationToken.None);
+
+            // Title is null so the AI picks one from the document
+            // (CustomQuizTitle defaults to "Networking basics", which would be forced onto every quiz).
+            var generated = await apiClient.GenerateQuizAsync(file, null, CancellationToken.None);
             if (generated is null || generated.Blocks.Count == 0)
             {
                 StatusMessage = "The AI returned no quiz pairs. You can enter the pairs manually.";
@@ -236,6 +176,10 @@ public partial class MainViewModel : ObservableObject
         {
             StatusMessage = $"Quiz generation failed: {exception.Message}";
             IsEditorVisible = true;
+        }
+        finally
+        {
+            IsBusy = false;
         }
     }
 

@@ -1,0 +1,2942 @@
+App.xaml.cs:
+<code>
+﻿using Microsoft.Extensions.DependencyInjection;
+
+namespace SnapBlast
+{
+    public partial class App : Application
+    {
+        public App()
+        {
+            InitializeComponent();
+        }
+
+        protected override Window CreateWindow(IActivationState? activationState)
+        {
+            return new Window(new AppShell());
+        }
+    }
+}
+</code>
+
+AppShell.xaml.cs:
+<code>
+﻿namespace SnapBlast;
+
+public partial class AppShell : Shell
+{
+    public AppShell()
+    {
+        InitializeComponent();
+    }
+}
+</code>
+
+MainPage.xaml.cs:
+<code>
+﻿using SnapBlast.ViewModels;
+
+namespace SnapBlast;
+
+public partial class MainPage : ContentPage
+{
+    private readonly MainViewModel viewModel;
+
+    public MainPage(MainViewModel viewModel)
+    {
+        InitializeComponent();
+        this.viewModel = viewModel;
+        BindingContext = viewModel;
+        viewModel.PropertyChanged += OnViewModelPropertyChanged;
+        var playView = this.FindByName<Views.PuzzlePlayView>("PlayView");
+        playView.TileDropped += OnTileDropped;
+        playView.TileDropRejected += OnTileDropRejected;
+        UpdateBoard();
+    }
+
+    private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is nameof(MainViewModel.BoardVersion) or nameof(MainViewModel.SelectedTileIndex))
+        {
+            UpdateBoard();
+        }
+    }
+
+    private void UpdateBoard()
+    {
+        var playView = this.FindByName<Views.PuzzlePlayView>("PlayView");
+        playView.Engine = viewModel.Engine;
+        playView.SelectedTileIndex = viewModel.SelectedTileIndex;
+        playView.Refresh();
+    }
+
+    private void OnTileDropped(object? sender, Views.TileDropEventArgs e)
+    {
+        viewModel.TryPlaceTile(e.Tile, e.Row, e.Column);
+    }
+
+    private void OnTileDropRejected(object? sender, EventArgs e)
+    {
+        viewModel.StatusMessage = "That tile does not perfectly fit there, so it was returned to the tray.";
+    }
+}
+
+</code>
+
+MauiProgram.cs:
+<code>
+﻿using Microsoft.Extensions.Logging;
+using SnapBlast.Configuration;
+using SnapBlast.Services;
+using SnapBlast.ViewModels;
+using SnapBlast.Views;
+
+namespace SnapBlast
+{
+    public static class MauiProgram
+    {
+        public static MauiApp CreateMauiApp()
+        {
+            var builder = MauiApp.CreateBuilder();
+            builder
+                .UseMauiApp<App>()
+                .ConfigureFonts(fonts =>
+                {
+                    fonts.AddFont("OpenSans-Regular.ttf", "OpenSansRegular");
+                    fonts.AddFont("OpenSans-Semibold.ttf", "OpenSansSemibold");
+                });
+
+            // One shared API client so the signed-in user/token is the same everywhere.
+            builder.Services.AddSingleton<QuizApiClient>(_ =>
+            {
+                var client = new HttpClient
+                {
+                    BaseAddress = new Uri(ApiSettings.BaseUrl)
+                };
+                return new QuizApiClient(client);
+            });
+
+            // Every page that Shell creates from a DataTemplate must be registered,
+            // together with its view model, so constructor injection works.
+            builder.Services.AddTransient<LoginViewModel>();
+            builder.Services.AddTransient<LoginPage>();
+
+            builder.Services.AddTransient<GameModeSelectionViewModel>();
+            builder.Services.AddTransient<GameModeSelectionPage>();
+
+            builder.Services.AddTransient<MainViewModel>();
+            builder.Services.AddTransient<MainPage>();
+
+            builder.Services.AddTransient<MultipleChoiceViewModel>();
+            builder.Services.AddTransient<MultipleChoiceGamePage>();
+
+#if DEBUG
+            builder.Logging.AddDebug();
+#endif
+
+            return builder.Build();
+        }
+    }
+}
+</code>
+
+README.md:
+<code>
+# SnapBlast
+</code>
+
+Configuration\ApiSettings.cs:
+<code>
+namespace SnapBlast.Configuration;
+
+public static class ApiSettings
+{
+#if ANDROID
+    // Android emulator: 10.0.2.2 maps to the host machine.
+    public const string BaseUrl = "https://10.0.2.2:7280/";
+#elif WINDOWS
+    // Match SnapBlast.Api launch profile port (7280), not MongoDB's 27017.
+    public const string BaseUrl = "https://localhost:7280/";
+#else
+    public const string BaseUrl = "https://localhost:7280/";
+#endif
+}
+</code>
+
+Game\ExactFitLayoutGenerator.cs:
+<code>
+using SnapBlast.Models;
+
+namespace SnapBlast.Game;
+
+public sealed class ExactFitLayoutGenerator
+{
+    public const int BoardSize = 8;
+
+    private readonly Random random;
+
+    public ExactFitLayoutGenerator(Random? random = null)
+    {
+        this.random = random ?? new Random();
+    }
+
+    public PuzzleLayout Generate(IReadOnlyList<GameBlock> blocks)
+    {
+        if (blocks.Count is < 2 or > 32)
+        {
+            throw new ArgumentOutOfRangeException(nameof(blocks), "The exact-fit board requires between 2 and 32 quiz pairs.");
+        }
+
+        var regions = new List<RectangleRegion> { new(0, 0, BoardSize, BoardSize) };
+        while (regions.Count < blocks.Count)
+        {
+            var candidates = regions
+                .SelectMany((region, index) => GetSplits(region).Select(split => (index, split)))
+                .Where(candidate => candidate.split.First.Area >= 2 && candidate.split.Second.Area >= 2)
+                .ToList();
+
+            if (candidates.Count == 0)
+            {
+                throw new InvalidOperationException("Unable to partition the board for this number of quiz pairs.");
+            }
+
+            var candidate = candidates[random.Next(candidates.Count)];
+            regions.RemoveAt(candidate.index);
+            regions.Add(candidate.split.First);
+            regions.Add(candidate.split.Second);
+        }
+
+        var shuffledBlocks = blocks.OrderBy(_ => random.Next()).ToArray();
+        var tiles = new List<PuzzleTile>(blocks.Count * 2);
+
+        for (var pairIndex = 0; pairIndex < regions.Count; pairIndex++)
+        {
+            var block = shuffledBlocks[pairIndex];
+            var pairId = $"pair-{pairIndex}";
+            var split = SplitPairRegion(regions[pairIndex]);
+            var questionFirst = random.Next(2) == 0;
+
+            tiles.Add(CreateTile(pairId, block, PuzzleTileKind.Question, questionFirst ? split.First : split.Second));
+            tiles.Add(CreateTile(pairId, block, PuzzleTileKind.Answer, questionFirst ? split.Second : split.First));
+        }
+
+        var layout = new PuzzleLayout { Tiles = tiles };
+        if (layout.CellCount != BoardSize * BoardSize)
+        {
+            throw new InvalidOperationException("The generated layout does not fill the complete board.");
+        }
+
+        return layout;
+    }
+
+    private static PuzzleTile CreateTile(string pairId, GameBlock block, PuzzleTileKind kind, RectangleRegion region)
+    {
+        var cells = new List<GridCell>(region.Area);
+        for (var row = region.Row; row < region.Row + region.Height; row++)
+        {
+            for (var column = region.Column; column < region.Column + region.Width; column++)
+            {
+                cells.Add(new GridCell(row, column));
+            }
+        }
+
+        return new PuzzleTile
+        {
+            Id = $"{pairId}-{kind.ToString().ToLowerInvariant()}",
+            PairId = pairId,
+            Block = block,
+            Kind = kind,
+            TargetCells = cells
+        };
+    }
+
+    private static (RectangleRegion First, RectangleRegion Second) SplitPairRegion(RectangleRegion region)
+    {
+        if (region.Width >= 2)
+        {
+            var splitColumn = Math.Max(1, region.Width / 2);
+            return
+            (
+                new RectangleRegion(region.Row, region.Column, region.Height, splitColumn),
+                new RectangleRegion(region.Row, region.Column + splitColumn, region.Height, region.Width - splitColumn)
+            );
+        }
+
+        var splitRow = Math.Max(1, region.Height / 2);
+        return
+        (
+            new RectangleRegion(region.Row, region.Column, splitRow, region.Width),
+            new RectangleRegion(region.Row + splitRow, region.Column, region.Height - splitRow, region.Width)
+        );
+    }
+
+    private static IEnumerable<(RectangleRegion First, RectangleRegion Second)> GetSplits(RectangleRegion region)
+    {
+        for (var width = 1; width < region.Width; width++)
+        {
+            yield return
+            (
+                new RectangleRegion(region.Row, region.Column, region.Height, width),
+                new RectangleRegion(region.Row, region.Column + width, region.Height, region.Width - width)
+            );
+        }
+
+        for (var height = 1; height < region.Height; height++)
+        {
+            yield return
+            (
+                new RectangleRegion(region.Row, region.Column, height, region.Width),
+                new RectangleRegion(region.Row + height, region.Column, region.Height - height, region.Width)
+            );
+        }
+    }
+
+    private readonly record struct RectangleRegion(int Row, int Column, int Height, int Width)
+    {
+        public int Area => Height * Width;
+    }
+}
+
+</code>
+
+Game\FreePlacementPuzzleEngine.cs:
+<code>
+
+</code>
+
+Game\PuzzleEngine.cs:
+<code>
+using SnapBlast.Models;
+
+namespace SnapBlast.Game;
+
+public sealed class PuzzleEngine
+{
+    public const int BoardSize = 8;
+
+    private readonly ExactFitLayoutGenerator layoutGenerator;
+    private readonly PuzzleTile?[,] placedTiles = new PuzzleTile?[BoardSize, BoardSize];
+    private readonly Dictionary<PuzzleTile, List<GridCell>> placedCells = [];
+    private readonly List<PuzzleTile> remainingTiles = [];
+    private readonly HashSet<string> connectedPairIds = [];
+
+    public PuzzleEngine(ExactFitLayoutGenerator? layoutGenerator = null) => this.layoutGenerator = layoutGenerator ?? new ExactFitLayoutGenerator();
+    public PuzzleLayout Layout { get; private set; } = new() { Tiles = [] };
+    public IReadOnlyList<PuzzleTile> RemainingTiles => remainingTiles;
+    public int Score { get; private set; }
+    public bool IsComplete => remainingTiles.Count == 0;
+    public IReadOnlySet<string> ConnectedPairIds => connectedPairIds;
+    public bool IsOccupied(int row, int column) => placedTiles[row, column] is not null;
+    public PuzzleTile? GetTile(int row, int column) => placedTiles[row, column];
+    public IReadOnlyList<GridCell> GetPlacedCells(PuzzleTile tile) => placedCells.TryGetValue(tile, out var cells) ? cells : [];
+
+    public void StartNewGame(IReadOnlyList<GameBlock> blocks)
+    {
+        Layout = layoutGenerator.Generate(blocks);
+        remainingTiles.Clear();
+        remainingTiles.AddRange(Layout.Tiles.OrderBy(_ => Random.Shared.Next()));
+        Array.Clear(placedTiles);
+        placedCells.Clear();
+        connectedPairIds.Clear();
+        Score = 0;
+    }
+
+    public bool CanPlace(PuzzleTile tile, int row, int column) => remainingTiles.Contains(tile) && TryGetPlacementCells(tile, row, column, placedTiles, out _);
+
+    public PlacementResult Place(PuzzleTile tile, int row, int column)
+    {
+        if (!CanPlace(tile, row, column) || !TryGetPlacementCells(tile, row, column, placedTiles, out var cells)) return PlacementResult.Invalid;
+        Apply(tile, cells);
+        remainingTiles.Remove(tile);
+        if (!CanFinishRemaining())
+        {
+            Remove(tile, cells);
+            remainingTiles.Add(tile);
+            return PlacementResult.Invalid;
+        }
+
+        var pairConnected = PairCanConnect(tile, cells);
+        var touchesWrongPair = TouchesWrongPair(tile, cells);
+        if (pairConnected)
+        {
+            connectedPairIds.Add(tile.PairId);
+        }
+
+        Score += cells.Count * 5 + (pairConnected ? 25 : 0) - (touchesWrongPair ? 5 : 0);
+        return new PlacementResult(true, pairConnected, touchesWrongPair, Score);
+    }
+
+public readonly record struct PlacementResult(bool Success, bool PairConnected, bool TouchesWrongPair, int Score)
+{
+    public static PlacementResult Invalid => new(false, false, false, 0);
+}
+
+    private bool CanFinishRemaining()
+    {
+        if (remainingTiles.Count == 0) return true;
+        var candidate = remainingTiles.Select(tile => (Tile: tile, Placements: GetPossiblePlacements(tile).ToList())).OrderBy(item => item.Placements.Count).First();
+        if (candidate.Placements.Count == 0) return false;
+        foreach (var placement in candidate.Placements)
+        {
+            Apply(candidate.Tile, placement);
+            remainingTiles.Remove(candidate.Tile);
+            if (CanFinishRemaining())
+            {
+                remainingTiles.Add(candidate.Tile);
+                Remove(candidate.Tile, placement);
+                return true;
+            }
+            remainingTiles.Add(candidate.Tile);
+            Remove(candidate.Tile, placement);
+        }
+        return false;
+    }
+
+    private IEnumerable<List<GridCell>> GetPossiblePlacements(PuzzleTile tile)
+    {
+        for (var row = 0; row < BoardSize; row++)
+            for (var column = 0; column < BoardSize; column++)
+                if (TryGetPlacementCells(tile, row, column, placedTiles, out var cells) && PairCanConnect(tile, cells)) yield return cells;
+    }
+
+    private void Apply(PuzzleTile tile, List<GridCell> cells)
+    {
+        placedCells[tile] = cells;
+        foreach (var cell in cells) placedTiles[cell.Row, cell.Column] = tile;
+    }
+
+    private void Remove(PuzzleTile tile, IReadOnlyList<GridCell> cells)
+    {
+        foreach (var cell in cells) placedTiles[cell.Row, cell.Column] = null;
+        placedCells.Remove(tile);
+    }
+
+    private bool PairCanConnect(PuzzleTile tile, IReadOnlyList<GridCell> cells)
+    {
+        var matchingTile = Layout.Tiles.FirstOrDefault(candidate => candidate.PairId == tile.PairId && candidate.Kind != tile.Kind);
+        if (matchingTile is null || !placedCells.TryGetValue(matchingTile, out var matchingCells)) return true;
+        return cells.Any(cell => matchingCells.Any(other => Math.Abs(cell.Row - other.Row) + Math.Abs(cell.Column - other.Column) == 1));
+    }
+
+    private bool TouchesWrongPair(PuzzleTile tile, IReadOnlyList<GridCell> cells)
+    {
+        return cells.Any(cell => GetAdjacentTiles(cell).Any(neighbor => neighbor.PairId != tile.PairId));
+    }
+
+    private IEnumerable<PuzzleTile> GetAdjacentTiles(GridCell cell)
+    {
+        foreach (var (row, column) in new[]
+        {
+            (cell.Row - 1, cell.Column),
+            (cell.Row + 1, cell.Column),
+            (cell.Row, cell.Column - 1),
+            (cell.Row, cell.Column + 1)
+        })
+        {
+            if (row is >= 0 and < BoardSize && column is >= 0 and < BoardSize && placedTiles[row, column] is { } tile)
+            {
+                yield return tile;
+            }
+        }
+    }
+
+    private static bool TryGetPlacementCells(PuzzleTile tile, int row, int column, PuzzleTile?[,] board, out List<GridCell> cells)
+    {
+        var targetRow = tile.TargetCells.Min(cell => cell.Row);
+        var targetColumn = tile.TargetCells.Min(cell => cell.Column);
+        cells = tile.TargetCells.Select(cell => new GridCell(row + cell.Row - targetRow, column + cell.Column - targetColumn)).ToList();
+        if (cells.Any(cell => cell.Row < 0 || cell.Row >= BoardSize || cell.Column < 0 || cell.Column >= BoardSize || board[cell.Row, cell.Column] is not null))
+        {
+            cells.Clear();
+            return false;
+        }
+        return true;
+    }
+}
+
+</code>
+
+Models\MultipleChoiceQuestion.cs:
+<code>
+﻿namespace SnapBlast.Models;
+public sealed record MultipleChoiceQuestion(string Question, string CorrectAnswer, IReadOnlyList<string> WrongAnswers);
+</code>
+
+Models\QuizModels.cs:
+<code>
+namespace SnapBlast.Models;
+
+public sealed class Quiz
+{
+    public string Title { get; init; } = string.Empty;
+    public IReadOnlyList<GameBlock> Blocks { get; init; } = [];
+}
+
+public sealed class GameBlock
+{
+    public string Term { get; init; } = string.Empty;
+    public string Definition { get; init; } = string.Empty;
+    public IReadOnlyList<string> Distractors { get; init; } = [];
+}
+
+public sealed class PieceDefinition
+{
+    public PieceDefinition(string name, bool[,] cells, GameBlock block)
+    {
+        Name = name;
+        Cells = cells;
+        Block = block;
+        Height = cells.GetLength(0);
+        Width = cells.GetLength(1);
+    }
+
+    public string Name { get; }
+    public bool[,] Cells { get; }
+    public GameBlock Block { get; }
+    public int Width { get; }
+    public int Height { get; }
+}
+
+public enum PuzzleTileKind
+{
+    Question,
+    Answer
+}
+
+public readonly record struct GridCell(int Row, int Column);
+
+public sealed class PuzzleTile
+{
+    public required string Id { get; init; }
+    public required string PairId { get; init; }
+    public required GameBlock Block { get; init; }
+    public required PuzzleTileKind Kind { get; init; }
+    public required IReadOnlyList<GridCell> TargetCells { get; init; }
+
+    public bool IsQuestion => Kind == PuzzleTileKind.Question;
+}
+
+public sealed class PuzzleLayout
+{
+    public required IReadOnlyList<PuzzleTile> Tiles { get; init; }
+    public int CellCount => Tiles.Sum(tile => tile.TargetCells.Count);
+}
+
+</code>
+
+Platforms\Android\AndroidManifest.xml:
+<code>
+﻿<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+	<application android:allowBackup="true" android:icon="@mipmap/appicon" android:roundIcon="@mipmap/appicon_round" android:supportsRtl="true"></application>
+	<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+	<uses-permission android:name="android.permission.INTERNET" />
+	<uses-permission android:name="android.permission.CAMERA" />
+</manifest>
+</code>
+
+Platforms\Android\MainActivity.cs:
+<code>
+﻿using Android.App;
+using Android.Content.PM;
+using Android.OS;
+
+namespace SnapBlast
+{
+    [Activity(Theme = "@style/Maui.SplashTheme", MainLauncher = true, LaunchMode = LaunchMode.SingleTop, ConfigurationChanges = ConfigChanges.ScreenSize | ConfigChanges.Orientation | ConfigChanges.UiMode | ConfigChanges.ScreenLayout | ConfigChanges.SmallestScreenSize | ConfigChanges.Density)]
+    public class MainActivity : MauiAppCompatActivity
+    {
+    }
+}
+
+</code>
+
+Platforms\Android\MainApplication.cs:
+<code>
+﻿using Android.App;
+using Android.Runtime;
+
+namespace SnapBlast
+{
+    [Application]
+    public class MainApplication : MauiApplication
+    {
+        public MainApplication(IntPtr handle, JniHandleOwnership ownership)
+            : base(handle, ownership)
+        {
+        }
+
+        protected override MauiApp CreateMauiApp() => MauiProgram.CreateMauiApp();
+    }
+}
+
+</code>
+
+Platforms\Android\Resources\values\colors.xml:
+<code>
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="colorPrimary">#512BD4</color>
+    <color name="colorPrimaryDark">#2B0B98</color>
+    <color name="colorAccent">#2B0B98</color>
+</resources>
+</code>
+
+Platforms\iOS\AppDelegate.cs:
+<code>
+﻿using Foundation;
+
+namespace SnapBlast
+{
+    [Register("AppDelegate")]
+    public class AppDelegate : MauiUIApplicationDelegate
+    {
+        protected override MauiApp CreateMauiApp() => MauiProgram.CreateMauiApp();
+    }
+}
+
+</code>
+
+Platforms\iOS\Program.cs:
+<code>
+﻿using ObjCRuntime;
+using UIKit;
+
+namespace SnapBlast
+{
+    public class Program
+    {
+        // This is the main entry point of the application.
+        static void Main(string[] args)
+        {
+            // if you want to use a different Application Delegate class from "AppDelegate"
+            // you can specify it here.
+            UIApplication.Main(args, null, typeof(AppDelegate));
+        }
+    }
+}
+
+</code>
+
+Platforms\MacCatalyst\AppDelegate.cs:
+<code>
+﻿using Foundation;
+
+namespace SnapBlast
+{
+    [Register("AppDelegate")]
+    public class AppDelegate : MauiUIApplicationDelegate
+    {
+        protected override MauiApp CreateMauiApp() => MauiProgram.CreateMauiApp();
+    }
+}
+
+</code>
+
+Platforms\MacCatalyst\Program.cs:
+<code>
+﻿using ObjCRuntime;
+using UIKit;
+
+namespace SnapBlast
+{
+    public class Program
+    {
+        // This is the main entry point of the application.
+        static void Main(string[] args)
+        {
+            // if you want to use a different Application Delegate class from "AppDelegate"
+            // you can specify it here.
+            UIApplication.Main(args, null, typeof(AppDelegate));
+        }
+    }
+}
+
+</code>
+
+Platforms\Windows\App.xaml.cs:
+<code>
+﻿using Microsoft.UI.Xaml;
+
+// To learn more about WinUI, the WinUI project structure,
+// and more about our project templates, see: http://aka.ms/winui-project-info.
+
+namespace SnapBlast.WinUI
+{
+    /// <summary>
+    /// Provides application-specific behavior to supplement the default Application class.
+    /// </summary>
+    public partial class App : MauiWinUIApplication
+    {
+        /// <summary>
+        /// Initializes the singleton application object.  This is the first line of authored code
+        /// executed, and as such is the logical equivalent of main() or WinMain().
+        /// </summary>
+        public App()
+        {
+            this.InitializeComponent();
+        }
+
+        protected override MauiApp CreateMauiApp() => MauiProgram.CreateMauiApp();
+    }
+
+}
+
+</code>
+
+Properties\launchSettings.json:
+<code>
+{
+  "profiles": {
+    "Windows Machine": {
+      "commandName": "Project",
+      "nativeDebugging": false
+    }
+  }
+}
+</code>
+
+Services\QuizApiClient.cs:
+<code>
+using System.Net;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
+using System.Text.Json;
+
+namespace SnapBlast.Services;
+
+public sealed class QuizApiClient(HttpClient httpClient)
+{
+    private const string TokenKey = "snapblast_access_token";
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
+    /// <summary>Name of the signed-in user (empty when signed out).</summary>
+    public string DisplayName { get; private set; } = string.Empty;
+
+    /// <summary>
+    /// Signs in or registers. Throws InvalidOperationException with the server's message
+    /// when the credentials are rejected, and HttpRequestException when the server is unreachable.
+    /// </summary>
+    public async Task<AuthResult> AuthenticateAsync(string email, string password, string displayName, bool register, CancellationToken cancellationToken)
+    {
+        var endpoint = register ? "api/auth/register" : "api/auth/login";
+        using var response = register
+            ? await httpClient.PostAsJsonAsync(endpoint, new RegisterRequest(email, password, displayName), JsonOptions, cancellationToken)
+            : await httpClient.PostAsJsonAsync(endpoint, new LoginRequest(email, password), JsonOptions, cancellationToken);
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException(DescribeError(response.StatusCode, body));
+        }
+
+        var result = JsonSerializer.Deserialize<AuthResult>(body, JsonOptions)
+            ?? throw new InvalidOperationException("The API returned an empty authentication response.");
+        await SecureStorage.Default.SetAsync(TokenKey, result.AccessToken);
+        httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", result.AccessToken);
+        DisplayName = string.IsNullOrWhiteSpace(result.DisplayName) ? result.Email : result.DisplayName;
+        return result;
+    }
+
+    public void SignOut()
+    {
+        SecureStorage.Default.Remove(TokenKey);
+        httpClient.DefaultRequestHeaders.Authorization = null;
+        DisplayName = string.Empty;
+    }
+
+    /// <summary>Block Blast: extracts text and generates term/definition pairs.</summary>
+    public Task<GeneratedQuizResult?> GenerateQuizAsync(FileResult file, string? title, CancellationToken cancellationToken) =>
+        PostDocumentAsync("api/generation/quiz-from-document", file, title, cancellationToken);
+
+    /// <summary>Multiple choice: extracts text and generates questions with wrong answers (distractors).</summary>
+    public Task<GeneratedQuizResult?> GenerateMultipleChoiceAsync(FileResult file, string? title, CancellationToken cancellationToken) =>
+        PostDocumentAsync("api/generation/multiple-choice-from-document", file, title, cancellationToken);
+
+    private async Task<GeneratedQuizResult?> PostDocumentAsync(string endpoint, FileResult file, string? title, CancellationToken cancellationToken)
+    {
+        await using var stream = await file.OpenReadAsync();
+        using var content = new MultipartFormDataContent();
+        using var fileContent = new StreamContent(stream);
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue(file.ContentType ?? "application/octet-stream");
+        content.Add(fileContent, "file", file.FileName);
+        content.Add(new StringContent(title ?? string.Empty), "Title");
+        content.Add(new StringContent("false"), "Save");
+
+        var token = await SecureStorage.Default.GetAsync(TokenKey);
+        if (!string.IsNullOrWhiteSpace(token))
+        {
+            httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        }
+
+        using var response = await httpClient.PostAsync(endpoint, content, cancellationToken);
+        if (response.StatusCode == HttpStatusCode.Unauthorized)
+        {
+            throw new InvalidOperationException("Your session has expired. Go back to the menu, sign out, and sign in again.");
+        }
+
+        var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException(DescribeError(response.StatusCode, responseBody));
+        }
+
+        return JsonSerializer.Deserialize<GeneratedQuizResult>(responseBody, JsonOptions);
+    }
+
+    private static string DescribeError(HttpStatusCode status, string body)
+    {
+        var text = body.Trim();
+        if (text.Length > 250)
+        {
+            text = text[..250] + "...";
+        }
+
+        return string.IsNullOrWhiteSpace(text) ? $"Request failed ({(int)status} {status})." : text;
+    }
+}
+
+public sealed class AuthResult
+{
+    public string AccessToken { get; init; } = string.Empty;
+    public string DisplayName { get; init; } = string.Empty;
+    public string Email { get; init; } = string.Empty;
+}
+
+public sealed class GeneratedQuizResult
+{
+    public string Title { get; init; } = string.Empty;
+    public IReadOnlyList<GeneratedBlock> Blocks { get; init; } = [];
+}
+
+internal sealed record RegisterRequest(string Email, string Password, string DisplayName);
+
+internal sealed record LoginRequest(string Email, string Password);
+
+public sealed class GeneratedBlock
+{
+    public string Term { get; init; } = string.Empty;
+    public string Definition { get; init; } = string.Empty;
+    public IReadOnlyList<string> Distractors { get; init; } = [];
+}
+</code>
+
+Services\StudyFilePicker.cs:
+<code>
+﻿namespace SnapBlast.Services;
+
+/// <summary>Shared file/camera helpers so both game modes pick study material the same way.</summary>
+public static class StudyFilePicker
+{
+    private static readonly FilePickerFileType StudyTypes = new(new Dictionary<DevicePlatform, IEnumerable<string>>
+    {
+        { DevicePlatform.Android, new[] { "image/*", "application/pdf" } },
+        { DevicePlatform.iOS, new[] { "public.image", "com.adobe.pdf" } },
+        { DevicePlatform.MacCatalyst, new[] { "public.image", "com.adobe.pdf" } },
+        { DevicePlatform.WinUI, new[] { ".jpg", ".jpeg", ".png", ".webp", ".pdf" } }
+    });
+
+    public static Task<FileResult?> PickAsync() =>
+        FilePicker.Default.PickAsync(new PickOptions
+        {
+            PickerTitle = "Choose a study sheet",
+            FileTypes = StudyTypes
+        });
+
+    /// <summary>Throws FeatureNotSupportedException when there is no camera.</summary>
+    public static async Task<FileResult?> CaptureAsync()
+    {
+        if (!MediaPicker.Default.IsCaptureSupported)
+        {
+            throw new FeatureNotSupportedException();
+        }
+
+        return await MediaPicker.Default.CapturePhotoAsync(new MediaPickerOptions
+        {
+            Title = "Capture a study sheet"
+        });
+    }
+}
+</code>
+
+SnapBlast.Api\appsettings.example.json:
+<code>
+{
+  "ConnectionStrings": {
+    "MongoDb": "mongodb+srv://<username>:<password>@<cluster-host>/"
+  },
+  "Mongo": {
+    "ConnectionString": "mongodb+srv://<username>:<password>@<cluster-host>/",
+    "Database": "SnapBlast",
+    "QuizCollection": "quizzes",
+    "UserCollection": "users"
+  },
+  "Gemini": {
+    "ApiKey": "REPLACE_WITH_GOOGLE_AI_STUDIO_API_KEY",
+    "Model": "gemini-2.0-flash"
+  },
+  "Ocr": {
+    "Provider": "GoogleGemini",
+    "GoogleEnabled": true,
+    "TesseractEnabled": true,
+    "TesseractExecutablePath": "C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+    "TessdataPath": "C:\\Program Files\\Tesseract-OCR\\tessdata",
+    "Language": "eng"
+  },
+  "AzureVision": {
+    "Enabled": false,
+    "Endpoint": "https://<resource-name>.cognitiveservices.azure.com/",
+    "Key": "REPLACE_WITH_AZURE_VISION_KEY"
+  },
+  "Uploads": {
+    "MaxBytes": 10485760,
+    "AllowedContentTypes": [
+      "image/jpeg",
+      "image/png",
+      "image/webp"
+    ]
+  },
+  "Authentication": {
+    "JwtSecret": "REPLACE_WITH_A_LONG_RANDOM_SECRET_AT_LEAST_32_BYTES",
+    "Issuer": "SnapBlast.Api",
+    "Audience": "SnapBlast.Client",
+    "AccessTokenMinutes": 60
+  }
+}
+
+</code>
+
+SnapBlast.Api\LOCAL-SETUP.md:
+<code>
+# SnapBlast API local service setup
+
+The API project is the only place where provider credentials belong. Do not put these values in the .NET MAUI client, XAML, Git, screenshots, or API response models.
+
+## Values to replace
+
+Copy `appsettings.example.json` to `appsettings.Development.json` only if you understand that local settings must remain untracked. Replace these placeholders:
+
+| Setting | Replace with |
+|---|---|
+| `Mongo:ConnectionString` | MongoDB Atlas or local MongoDB connection string. Use a database user with only the permissions the API needs. |
+| `Mongo:Database` | Your MongoDB database name. |
+| `Mongo:QuizCollection` | Collection for saved quizzes. |
+| `Mongo:UserCollection` | Collection for user records. Never store plaintext passwords. |
+| `Gemini:ApiKey` | API key created in Google AI Studio. Restrict/rotate it where supported. |
+| `Gemini:Model` | A model enabled for your Google AI Studio project. |
+| `Ocr:Provider` | `GoogleGemini` for multimodal extraction, or `Tesseract` for local OCR. |
+| `Ocr:TesseractExecutablePath` | Full path to the installed Tesseract executable. |
+| `Ocr:TessdataPath` | Folder containing the language data files, such as `eng.traineddata`. |
+| `Ocr:Language` | Tesseract language code, normally `eng`. |
+| `AzureVision:Endpoint` and `AzureVision:Key` | Optional Azure Vision values only if Azure is enabled. |
+| `Authentication:JwtSecret` | A random secret of at least 32 bytes. Never reuse the Gemini or MongoDB credential. |
+| `Authentication:Issuer` and `Authentication:Audience` | Values used consistently by the API and MAUI client during JWT validation. |
+
+## Recommended user-secrets setup
+
+From the directory containing `SnapBlast.Api.csproj`, run:
+
+```powershell
+dotnet user-secrets set "Mongo:ConnectionString" "mongodb+srv://USER:PASSWORD@CLUSTER/"
+dotnet user-secrets set "Gemini:ApiKey" "PASTE_GOOGLE_AI_STUDIO_KEY_HERE"
+dotnet user-secrets set "Authentication:JwtSecret" "GENERATE_A_LONG_RANDOM_SECRET_HERE"
+dotnet user-secrets set "Ocr:TesseractExecutablePath" "C:\Program Files\Tesseract-OCR\tesseract.exe"
+dotnet user-secrets set "Ocr:TessdataPath" "C:\Program Files\Tesseract-OCR\tessdata"
+```
+
+The project already has a `UserSecretsId`, so these values are stored outside the repository. Do not commit the output of `dotnet user-secrets list`.
+
+## Google AI Studio and OCR
+
+Google AI Studio can be used for question/answer generation and, if the selected Gemini model supports image input, as the primary OCR/vision extraction provider. Treat its output as untrusted input: validate pair counts, remove unsafe text, enforce upload limits, and require the API to return structured JSON.
+
+Tesseract is a local fallback. It must be installed on the API host and supplied with the required `.traineddata` files. Tesseract is not currently wired into the API; this file only prepares the configuration names.
+
+## Authentication warning
+
+MongoDB stores user records, but passwords must be hashed with a slow password-hashing algorithm such as ASP.NET Core `IPasswordHasher<TUser>` or Argon2id. Never store passwords, refresh tokens, or provider API keys in plaintext. JWT signing and refresh-token storage should be implemented server-side before enabling login in the client.
+
+## Current implementation status
+
+The repository currently contains API option contracts and package references, not a complete controller/startup/authentication pipeline. These settings are a safe configuration starting point; they do not by themselves enable MongoDB, login, Google AI, or Tesseract calls.
+
+</code>
+
+SnapBlast.Api\Program.cs:
+<code>
+using System.Text;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.IdentityModel.Tokens;
+using MongoDB.Driver;
+using SnapBlast.Api.Models;
+using SnapBlast.Api.Services;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.Configure<MongoOptions>(builder.Configuration.GetSection("Mongo"));
+builder.Services.Configure<GeminiOptions>(builder.Configuration.GetSection("Gemini"));
+builder.Services.Configure<UploadOptions>(builder.Configuration.GetSection("Uploads"));
+builder.Services.Configure<AuthenticationOptions>(builder.Configuration.GetSection("Authentication"));
+
+var mongoConnection = builder.Configuration["Mongo:ConnectionString"] ?? builder.Configuration.GetConnectionString("MongoDb");
+if (string.IsNullOrWhiteSpace(mongoConnection)) throw new InvalidOperationException("Mongo:ConnectionString must be configured.");
+builder.Services.AddSingleton<IMongoClient>(_ => new MongoClient(mongoConnection));
+builder.Services.AddSingleton<IUserRepository, MongoUserRepository>();
+builder.Services.AddSingleton<IQuizRepository, MongoQuizRepository>();
+builder.Services.AddSingleton<IPasswordHasher<UserDocument>, PasswordHasher<UserDocument>>();
+builder.Services.AddSingleton<JwtTokenService>();
+builder.Services.AddHttpClient<GeminiQuizService>(client => client.BaseAddress = new Uri("https://generativelanguage.googleapis.com/"));
+
+var authOptions = builder.Configuration.GetSection("Authentication").Get<AuthenticationOptions>() ?? new();
+if (Encoding.UTF8.GetByteCount(authOptions.JwtSecret) < 32) throw new InvalidOperationException("Authentication:JwtSecret must be configured with at least 32 bytes.");
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(options =>
+{
+    options.TokenValidationParameters = new TokenValidationParameters
+    {
+        ValidateIssuerSigningKey = true,
+        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(authOptions.JwtSecret)),
+        ValidateIssuer = true,
+        ValidIssuer = authOptions.Issuer,
+        ValidateAudience = true,
+        ValidAudience = authOptions.Audience,
+        ValidateLifetime = true,
+        ClockSkew = TimeSpan.FromMinutes(1)
+    };
+});
+builder.Services.AddAuthorization();
+builder.Services.AddControllers();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+var app = builder.Build();
+
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
+app.UseHttpsRedirection();
+app.UseAuthentication();
+app.UseAuthorization();
+app.MapControllers();
+
+app.Run();
+
+</code>
+
+SnapBlast.Api\Controllers\AuthController.cs:
+<code>
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Mvc;
+using SnapBlast.Api.Models;
+using SnapBlast.Api.Services;
+
+namespace SnapBlast.Api.Controllers;
+
+[ApiController]
+[Route("api/auth")]
+public sealed class AuthController(IUserRepository users, JwtTokenService tokens, IPasswordHasher<UserDocument> passwordHasher) : ControllerBase
+{
+    [HttpPost("register")]
+    public async Task<ActionResult<AuthResponse>> Register(RegisterRequest request, CancellationToken cancellationToken)
+    {
+        var email = request.Email.Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(email) || request.Password.Length < 8)
+        {
+            return BadRequest("A valid email and password of at least 8 characters are required.");
+        }
+
+        if (await users.FindByEmailAsync(email, cancellationToken) is not null)
+        {
+            return Conflict("An account with that email already exists.");
+        }
+
+        var user = new UserDocument
+        {
+            Email = email,
+            DisplayName = string.IsNullOrWhiteSpace(request.DisplayName) ? email : request.DisplayName.Trim()
+        };
+        user.PasswordHash = passwordHasher.HashPassword(user, request.Password);
+        await users.CreateAsync(user, cancellationToken);
+        return Ok(tokens.CreateToken(user));
+    }
+
+    [HttpPost("login")]
+    public async Task<ActionResult<AuthResponse>> Login(LoginRequest request, CancellationToken cancellationToken)
+    {
+        var user = await users.FindByEmailAsync(request.Email.Trim().ToLowerInvariant(), cancellationToken);
+        if (user is null || passwordHasher.VerifyHashedPassword(user, user.PasswordHash, request.Password) == PasswordVerificationResult.Failed)
+        {
+            return Unauthorized("Invalid email or password.");
+        }
+
+        return Ok(tokens.CreateToken(user));
+    }
+}
+</code>
+
+SnapBlast.Api\Controllers\GenerationController.cs:
+<code>
+using System.Security.Claims;
+using System.Text.Json;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
+using MongoDB.Bson;
+using SnapBlast.Api.Models;
+using SnapBlast.Api.Services;
+
+namespace SnapBlast.Api.Controllers;
+
+[ApiController]
+[Authorize]
+[Route("api/generation")]
+public sealed class GenerationController(GeminiQuizService generator, IQuizRepository quizzes, IOptions<UploadOptions> uploadOptions) : ControllerBase
+{
+    private delegate Task<GeneratedQuizPayload> Generator(Stream document, string contentType, string? title, CancellationToken cancellationToken);
+
+    // Block Blast: term/definition pairs
+    [HttpPost("quiz-from-document")]
+    [RequestSizeLimit(25 * 1024 * 1024)]
+    public Task<ActionResult<QuizResponse>> Generate(IFormFile file, [FromForm] GenerateQuizRequest request, CancellationToken cancellationToken) =>
+        BuildQuizAsync(file, request, generator.GenerateAsync, cancellationToken);
+
+    // Multiple choice: question + correct answer + wrong answers
+    [HttpPost("multiple-choice-from-document")]
+    [RequestSizeLimit(25 * 1024 * 1024)]
+    public Task<ActionResult<QuizResponse>> GenerateMultipleChoice(IFormFile file, [FromForm] GenerateQuizRequest request, CancellationToken cancellationToken) =>
+        BuildQuizAsync(file, request, generator.GenerateMultipleChoiceAsync, cancellationToken);
+
+    private async Task<ActionResult<QuizResponse>> BuildQuizAsync(IFormFile file, GenerateQuizRequest request, Generator generate, CancellationToken cancellationToken)
+    {
+        if (file is null || file.Length == 0) return BadRequest("A document is required.");
+        var settings = uploadOptions.Value;
+        if (file.Length > settings.MaxBytes || !settings.AllowedContentTypes.Contains(file.ContentType, StringComparer.OrdinalIgnoreCase)) return BadRequest("The document type or size is not allowed.");
+
+        GeneratedQuizPayload generated;
+        try
+        {
+            await using var stream = file.OpenReadStream();
+            generated = await generate(stream, file.ContentType, request.Title, cancellationToken);
+        }
+        catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException or JsonException or KeyNotFoundException)
+        {
+            // Return the reason to the app instead of a blank 500.
+            return StatusCode(StatusCodes.Status502BadGateway, $"Quiz generation failed: {exception.Message}");
+        }
+
+        if (!request.Save) return Ok(new QuizResponse { Id = string.Empty, Title = generated.Title, Blocks = generated.Blocks, CreatedAt = DateTimeOffset.UtcNow });
+        var quiz = new QuizDocument { Id = ObjectId.GenerateNewId().ToString(), OwnerId = UserId(), Title = generated.Title, Blocks = generated.Blocks.ToList() };
+        await quizzes.CreateAsync(quiz, cancellationToken);
+        return Ok(new QuizResponse { Id = quiz.Id, Title = quiz.Title, Blocks = quiz.Blocks, CreatedAt = quiz.CreatedAt });
+    }
+
+    private string UserId() => User.FindFirstValue(ClaimTypes.NameIdentifier) ?? throw new InvalidOperationException("Authenticated user ID is missing.");
+}
+</code>
+
+SnapBlast.Api\Controllers\QuizzesController.cs:
+<code>
+using System.Security.Claims;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using MongoDB.Bson;
+using SnapBlast.Api.Models;
+using SnapBlast.Api.Services;
+
+namespace SnapBlast.Api.Controllers;
+
+[ApiController]
+[Authorize]
+[Route("api/quizzes")]
+public sealed class QuizzesController(IQuizRepository quizzes) : ControllerBase
+{
+    [HttpGet]
+    public async Task<ActionResult<IReadOnlyList<QuizResponse>>> List(CancellationToken cancellationToken) =>
+        Ok((await quizzes.ListAsync(UserId(), cancellationToken)).Select(ToResponse).ToArray());
+
+    [HttpGet("{id}")]
+    public async Task<ActionResult<QuizResponse>> Get(string id, CancellationToken cancellationToken)
+    {
+        var quiz = await quizzes.GetAsync(UserId(), id, cancellationToken);
+        return quiz is null ? NotFound() : Ok(ToResponse(quiz));
+    }
+
+    [HttpPost]
+    public async Task<ActionResult<QuizResponse>> Create(SaveQuizRequest request, CancellationToken cancellationToken)
+    {
+        if (!IsValid(request)) return BadRequest("A title and at least two complete quiz pairs are required.");
+        var quiz = new QuizDocument { Id = ObjectId.GenerateNewId().ToString(), OwnerId = UserId(), Title = request.Title.Trim(), Blocks = request.Blocks.ToList() };
+        await quizzes.CreateAsync(quiz, cancellationToken);
+        return CreatedAtAction(nameof(Get), new { id = quiz.Id }, ToResponse(quiz));
+    }
+
+    [HttpPut("{id}")]
+    public async Task<ActionResult<QuizResponse>> Update(string id, SaveQuizRequest request, CancellationToken cancellationToken)
+    {
+        if (!IsValid(request)) return BadRequest("A title and at least two complete quiz pairs are required.");
+        var quiz = await quizzes.GetAsync(UserId(), id, cancellationToken);
+        if (quiz is null) return NotFound();
+        quiz.Title = request.Title.Trim();
+        quiz.Blocks = request.Blocks.ToList();
+        quiz.UpdatedAt = DateTimeOffset.UtcNow;
+        await quizzes.UpdateAsync(quiz, cancellationToken);
+        return Ok(ToResponse(quiz));
+    }
+
+    [HttpDelete("{id}")]
+    public async Task<IActionResult> Delete(string id, CancellationToken cancellationToken) =>
+        await quizzes.DeleteAsync(UserId(), id, cancellationToken) ? NoContent() : NotFound();
+
+    private string UserId() => User.FindFirstValue(ClaimTypes.NameIdentifier) ?? throw new InvalidOperationException("Authenticated user ID is missing.");
+    private static bool IsValid(SaveQuizRequest request) => !string.IsNullOrWhiteSpace(request.Title) && request.Blocks.Count >= 2 && request.Blocks.All(block => !string.IsNullOrWhiteSpace(block.Term) && !string.IsNullOrWhiteSpace(block.Definition));
+    private static QuizResponse ToResponse(QuizDocument quiz) => new() { Id = quiz.Id, Title = quiz.Title, CreatedAt = quiz.CreatedAt, Blocks = quiz.Blocks };
+}
+</code>
+
+SnapBlast.Api\Models\ApiModels.cs:
+<code>
+namespace SnapBlast.Api.Models;
+
+public sealed class QuizResponse
+{
+    public string Id { get; init; } = string.Empty;
+    public string Title { get; init; } = string.Empty;
+    public string ImageHash { get; init; } = string.Empty;
+    public DateTimeOffset CreatedAt { get; init; }
+    public IReadOnlyList<GameBlockResponse> Blocks { get; init; } = [];
+}
+
+public sealed class RegisterRequest
+{
+    public string Email { get; init; } = string.Empty;
+    public string Password { get; init; } = string.Empty;
+    public string DisplayName { get; init; } = string.Empty;
+}
+
+public sealed class LoginRequest
+{
+    public string Email { get; init; } = string.Empty;
+    public string Password { get; init; } = string.Empty;
+}
+
+public sealed class AuthResponse
+{
+    public string AccessToken { get; init; } = string.Empty;
+    public DateTimeOffset ExpiresAt { get; init; }
+    public string UserId { get; init; } = string.Empty;
+    public string Email { get; init; } = string.Empty;
+    public string DisplayName { get; init; } = string.Empty;
+}
+
+public sealed class SaveQuizRequest
+{
+    public string Title { get; init; } = string.Empty;
+    public IReadOnlyList<GameBlockResponse> Blocks { get; init; } = [];
+}
+
+public sealed class GenerateQuizRequest
+{
+    public string? Title { get; init; }
+    public bool Save { get; init; }
+}
+
+public sealed class GameBlockResponse
+{
+    public string Term { get; init; } = string.Empty;
+    public string Definition { get; init; } = string.Empty;
+    public IReadOnlyList<string> Distractors { get; init; } = [];
+}
+
+public sealed class GeneratedQuizPayload
+{
+    public string Title { get; init; } = string.Empty;
+    public IReadOnlyList<GameBlockResponse> Blocks { get; init; } = [];
+}
+
+</code>
+
+SnapBlast.Api\Models\ApiOptions.cs:
+<code>
+namespace SnapBlast.Api.Models;
+
+public sealed class VisionOptions
+{
+    public string Endpoint { get; init; } = string.Empty;
+    public string Key { get; init; } = string.Empty;
+}
+
+public sealed class GeminiOptions
+{
+    public string ApiKey { get; init; } = string.Empty;
+    public string Model { get; init; } = "gemini-2.0-flash";
+}
+
+public sealed class MongoOptions
+{
+    public string ConnectionString { get; init; } = string.Empty;
+    public string Database { get; init; } = "SnapBlast";
+    public string QuizCollection { get; init; } = "quizzes";
+    public string UserCollection { get; init; } = "users";
+}
+
+public sealed class UploadOptions
+{
+    public int MaxBytes { get; init; } = 10 * 1024 * 1024;
+    public string[] AllowedContentTypes { get; init; } = ["image/jpeg", "image/png", "image/webp", "application/pdf"];
+}
+
+public sealed class AuthenticationOptions
+{
+    public string JwtSecret { get; init; } = string.Empty;
+    public string Issuer { get; init; } = "SnapBlast.Api";
+    public string Audience { get; init; } = "SnapBlast.Client";
+    public int AccessTokenMinutes { get; init; } = 60;
+}
+
+public sealed class OcrOptions
+{
+    public string Provider { get; init; } = "GoogleGemini";
+    public bool GoogleEnabled { get; init; } = true;
+    public bool TesseractEnabled { get; init; } = true;
+    public string TesseractExecutablePath { get; init; } = string.Empty;
+    public string TessdataPath { get; init; } = string.Empty;
+    public string Language { get; init; } = "eng";
+}
+
+</code>
+
+SnapBlast.Api\Models\MongoDocuments.cs:
+<code>
+using MongoDB.Bson;
+using MongoDB.Bson.Serialization.Attributes;
+
+namespace SnapBlast.Api.Models;
+
+public sealed class UserDocument
+{
+    [BsonId]
+    [BsonRepresentation(BsonType.ObjectId)]
+    public string Id { get; set; } = string.Empty;
+
+    [BsonElement("email")]
+    public string Email { get; set; } = string.Empty;
+
+    [BsonElement("displayName")]
+    public string DisplayName { get; set; } = string.Empty;
+
+    [BsonElement("passwordHash")]
+    public string PasswordHash { get; set; } = string.Empty;
+
+    [BsonElement("createdAt")]
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public sealed class QuizDocument
+{
+    [BsonId]
+    [BsonRepresentation(BsonType.ObjectId)]
+    public string Id { get; set; } = string.Empty;
+
+    [BsonElement("ownerId")]
+    public string OwnerId { get; set; } = string.Empty;
+
+    [BsonElement("title")]
+    public string Title { get; set; } = string.Empty;
+
+    [BsonElement("blocks")]
+    public List<GameBlockResponse> Blocks { get; set; } = [];
+
+    [BsonElement("createdAt")]
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    [BsonElement("updatedAt")]
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+</code>
+
+SnapBlast.Api\Properties\launchSettings.example.json:
+<code>
+{
+  "profiles": {
+    "https": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "launchUrl": "swagger",
+      "applicationUrl": "https://localhost:7280;http://localhost:5280",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}
+
+</code>
+
+SnapBlast.Api\Properties\launchSettings.json:
+<code>
+{
+  "profiles": {
+    "https": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "launchUrl": "swagger",
+      "applicationUrl": "https://localhost:7280;http://localhost:5280",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}
+
+</code>
+
+SnapBlast.Api\Services\GeminiQuizService.cs:
+<code>
+using System.Net.Http.Json;
+using System.Text.Json;
+using Microsoft.Extensions.Options;
+using SnapBlast.Api.Models;
+
+namespace SnapBlast.Api.Services;
+
+public sealed class GeminiQuizService(HttpClient httpClient, IOptions<GeminiOptions> options)
+{
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
+    /// <summary>Block Blast: term/definition pairs (distractors optional).</summary>
+    public async Task<GeneratedQuizPayload> GenerateAsync(Stream document, string contentType, string? requestedTitle, CancellationToken cancellationToken)
+    {
+        var prompt = "Extract the study material and generate a quiz. Return ONLY valid JSON matching this schema: {\"title\":\"string\",\"blocks\":[{\"term\":\"question or concept\",\"definition\":\"correct answer or explanation\",\"distractors\":[\"optional wrong answer\"]}]}. Create 2 to 32 high-quality pairs. Do not include markdown fences. " + TitleHint(requestedTitle);
+        var payload = await RequestAsync(document, contentType, prompt, cancellationToken);
+        if (string.IsNullOrWhiteSpace(payload.Title) || payload.Blocks.Count is < 2 or > 32 || payload.Blocks.Any(block => string.IsNullOrWhiteSpace(block.Term) || string.IsNullOrWhiteSpace(block.Definition)))
+        {
+            throw new InvalidOperationException("Gemini returned an invalid quiz payload.");
+        }
+
+        return payload;
+    }
+
+    /// <summary>Multiple choice: each block is a question, its correct answer, and up to 3 wrong answers.</summary>
+    public async Task<GeneratedQuizPayload> GenerateMultipleChoiceAsync(Stream document, string contentType, string? requestedTitle, CancellationToken cancellationToken)
+    {
+        var prompt = "Extract the study material from this document and write multiple-choice quiz questions about it. Return ONLY valid JSON matching this schema: {\"title\":\"string\",\"blocks\":[{\"term\":\"the question text\",\"definition\":\"the single correct answer\",\"distractors\":[\"wrong answer 1\",\"wrong answer 2\",\"wrong answer 3\"]}]}. Create 5 to 20 questions. Every question must have exactly 3 plausible but clearly incorrect distractors that are similar in length and style to the correct answer. Do not include markdown fences. " + TitleHint(requestedTitle);
+        var payload = await RequestAsync(document, contentType, prompt, cancellationToken);
+
+        var blocks = payload.Blocks.Select(ToMultipleChoiceBlock).OfType<GameBlockResponse>().Take(32).ToList();
+        if (string.IsNullOrWhiteSpace(payload.Title) || blocks.Count < 2)
+        {
+            throw new InvalidOperationException("Gemini returned too few usable multiple-choice questions.");
+        }
+
+        return new GeneratedQuizPayload { Title = payload.Title.Trim(), Blocks = blocks };
+    }
+
+    // Cleans one AI-generated question: trims, removes blank/duplicate/identical-to-answer distractors, keeps at most 3.
+    private static GameBlockResponse? ToMultipleChoiceBlock(GameBlockResponse block)
+    {
+        var question = block.Term?.Trim();
+        var answer = block.Definition?.Trim();
+        if (string.IsNullOrEmpty(question) || string.IsNullOrEmpty(answer)) return null;
+
+        var wrong = (block.Distractors ?? Array.Empty<string>())
+            .Select(item => item?.Trim() ?? string.Empty)
+            .Where(item => item.Length > 0 && !item.Equals(answer, StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(3)
+            .ToList();
+
+        return wrong.Count < 2 ? null : new GameBlockResponse { Term = question, Definition = answer, Distractors = wrong };
+    }
+
+    private static string TitleHint(string? requestedTitle) =>
+        string.IsNullOrWhiteSpace(requestedTitle) ? string.Empty : $"Use this title: {requestedTitle.Trim()}.";
+
+    private async Task<GeneratedQuizPayload> RequestAsync(Stream document, string contentType, string prompt, CancellationToken cancellationToken)
+    {
+        var settings = options.Value;
+        if (string.IsNullOrWhiteSpace(settings.ApiKey)) throw new InvalidOperationException("Gemini:ApiKey is not configured.");
+
+        await using var memory = new MemoryStream();
+        await document.CopyToAsync(memory, cancellationToken);
+        var encoded = Convert.ToBase64String(memory.ToArray());
+        var request = new
+        {
+            contents = new[] { new { parts = new object[] { new { text = prompt }, new { inline_data = new { mime_type = contentType, data = encoded } } } } },
+            generationConfig = new { response_mime_type = "application/json", temperature = 0.3 }
+        };
+
+        using var response = await httpClient.PostAsJsonAsync($"v1beta/models/{settings.Model}:generateContent?key={Uri.EscapeDataString(settings.ApiKey)}", request, JsonOptions, cancellationToken);
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            // Surface Google's own error text (bad key, retired model name, quota...) instead of a bare status code.
+            throw new HttpRequestException($"Gemini returned {(int)response.StatusCode} {response.ReasonPhrase}: {body[..Math.Min(body.Length, 300)]}");
+        }
+
+        using var json = JsonDocument.Parse(body);
+        if (!json.RootElement.TryGetProperty("candidates", out var candidates) || candidates.GetArrayLength() == 0)
+        {
+            throw new InvalidOperationException("Gemini returned no result (the document may have been blocked).");
+        }
+
+        var text = candidates[0].GetProperty("content").GetProperty("parts")[0].GetProperty("text").GetString();
+        return JsonSerializer.Deserialize<GeneratedQuizPayload>(StripCodeFence(text ?? string.Empty), JsonOptions)
+            ?? throw new InvalidOperationException("Gemini returned an empty quiz.");
+    }
+
+    // Models sometimes wrap JSON in ```json fences even when told not to.
+    private static string StripCodeFence(string text)
+    {
+        var trimmed = text.Trim();
+        if (!trimmed.StartsWith("```")) return trimmed;
+        var firstNewLine = trimmed.IndexOf('\n');
+        var lastFence = trimmed.LastIndexOf("```", StringComparison.Ordinal);
+        return firstNewLine >= 0 && lastFence > firstNewLine ? trimmed[(firstNewLine + 1)..lastFence].Trim() : trimmed;
+    }
+}
+</code>
+
+SnapBlast.Api\Services\IQuizRepository.cs:
+<code>
+using SnapBlast.Api.Models;
+
+namespace SnapBlast.Api.Services;
+
+public interface IQuizRepository
+{
+    Task<IReadOnlyList<QuizDocument>> ListAsync(string ownerId, CancellationToken cancellationToken);
+    Task<QuizDocument?> GetAsync(string ownerId, string id, CancellationToken cancellationToken);
+    Task CreateAsync(QuizDocument quiz, CancellationToken cancellationToken);
+    Task<bool> UpdateAsync(QuizDocument quiz, CancellationToken cancellationToken);
+    Task<bool> DeleteAsync(string ownerId, string id, CancellationToken cancellationToken);
+}
+</code>
+
+SnapBlast.Api\Services\IUserRepository.cs:
+<code>
+using SnapBlast.Api.Models;
+
+namespace SnapBlast.Api.Services;
+
+public interface IUserRepository
+{
+    Task<UserDocument?> FindByEmailAsync(string email, CancellationToken cancellationToken);
+    Task<UserDocument?> FindByIdAsync(string id, CancellationToken cancellationToken);
+    Task CreateAsync(UserDocument user, CancellationToken cancellationToken);
+}
+</code>
+
+SnapBlast.Api\Services\JwtTokenService.cs:
+<code>
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Text;
+using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Tokens;
+using SnapBlast.Api.Models;
+
+namespace SnapBlast.Api.Services;
+
+public sealed class JwtTokenService(IOptions<AuthenticationOptions> options)
+{
+    public AuthResponse CreateToken(UserDocument user)
+    {
+        var settings = options.Value;
+        if (string.IsNullOrWhiteSpace(settings.JwtSecret) || Encoding.UTF8.GetByteCount(settings.JwtSecret) < 32)
+        {
+            throw new InvalidOperationException("Authentication:JwtSecret must be configured with at least 32 bytes.");
+        }
+
+        var expiresAt = DateTimeOffset.UtcNow.AddMinutes(settings.AccessTokenMinutes);
+        var claims = new[]
+        {
+            new Claim(JwtRegisteredClaimNames.Sub, user.Id),
+            new Claim(ClaimTypes.NameIdentifier, user.Id),
+            new Claim(ClaimTypes.Email, user.Email),
+            new Claim(ClaimTypes.Name, user.DisplayName)
+        };
+        var credentials = new SigningCredentials(new SymmetricSecurityKey(Encoding.UTF8.GetBytes(settings.JwtSecret)), SecurityAlgorithms.HmacSha256);
+        var token = new JwtSecurityToken(settings.Issuer, settings.Audience, claims, expires: expiresAt.UtcDateTime, signingCredentials: credentials);
+
+        return new AuthResponse
+        {
+            AccessToken = new JwtSecurityTokenHandler().WriteToken(token),
+            ExpiresAt = expiresAt,
+            UserId = user.Id,
+            Email = user.Email,
+            DisplayName = user.DisplayName
+        };
+    }
+}
+</code>
+
+SnapBlast.Api\Services\MongoRepositories.cs:
+<code>
+using Microsoft.Extensions.Options;
+using MongoDB.Driver;
+using SnapBlast.Api.Models;
+
+namespace SnapBlast.Api.Services;
+
+public sealed class MongoUserRepository : IUserRepository
+{
+    private readonly IMongoCollection<UserDocument> users;
+
+    public MongoUserRepository(IMongoClient client, IOptions<MongoOptions> options)
+    {
+        var database = client.GetDatabase(options.Value.Database);
+        users = database.GetCollection<UserDocument>(options.Value.UserCollection);
+        users.Indexes.CreateOne(new CreateIndexModel<UserDocument>(Builders<UserDocument>.IndexKeys.Ascending(user => user.Email), new CreateIndexOptions { Unique = true }));
+    }
+
+    public async Task<UserDocument?> FindByEmailAsync(string email, CancellationToken cancellationToken) =>
+        await users.Find(user => user.Email == email).FirstOrDefaultAsync(cancellationToken);
+
+    public async Task<UserDocument?> FindByIdAsync(string id, CancellationToken cancellationToken) =>
+        await users.Find(user => user.Id == id).FirstOrDefaultAsync(cancellationToken);
+
+    public Task CreateAsync(UserDocument user, CancellationToken cancellationToken) => users.InsertOneAsync(user, cancellationToken: cancellationToken);
+}
+
+public sealed class MongoQuizRepository : IQuizRepository
+{
+    private readonly IMongoCollection<QuizDocument> quizzes;
+
+    public MongoQuizRepository(IMongoClient client, IOptions<MongoOptions> options)
+    {
+        var database = client.GetDatabase(options.Value.Database);
+        quizzes = database.GetCollection<QuizDocument>(options.Value.QuizCollection);
+        quizzes.Indexes.CreateOne(new CreateIndexModel<QuizDocument>(Builders<QuizDocument>.IndexKeys.Ascending(quiz => quiz.OwnerId)));
+    }
+
+    public async Task<IReadOnlyList<QuizDocument>> ListAsync(string ownerId, CancellationToken cancellationToken) =>
+        await quizzes.Find(quiz => quiz.OwnerId == ownerId).SortByDescending(quiz => quiz.UpdatedAt).ToListAsync(cancellationToken);
+
+    public async Task<QuizDocument?> GetAsync(string ownerId, string id, CancellationToken cancellationToken) =>
+        await quizzes.Find(quiz => quiz.OwnerId == ownerId && quiz.Id == id).FirstOrDefaultAsync(cancellationToken);
+
+    public Task CreateAsync(QuizDocument quiz, CancellationToken cancellationToken) => quizzes.InsertOneAsync(quiz, cancellationToken: cancellationToken);
+
+    public async Task<bool> UpdateAsync(QuizDocument quiz, CancellationToken cancellationToken) =>
+        (await quizzes.ReplaceOneAsync(item => item.OwnerId == quiz.OwnerId && item.Id == quiz.Id, quiz, cancellationToken: cancellationToken)).ModifiedCount == 1;
+
+    public async Task<bool> DeleteAsync(string ownerId, string id, CancellationToken cancellationToken) =>
+        (await quizzes.DeleteOneAsync(quiz => quiz.OwnerId == ownerId && quiz.Id == id, cancellationToken)).DeletedCount == 1;
+}
+</code>
+
+Tests\ExactFitLayoutTests.cs:
+<code>
+using SnapBlast.Game;
+using SnapBlast.Models;
+using Xunit;
+
+namespace SnapBlast.Tests;
+
+public sealed class ExactFitLayoutTests
+{
+    [Theory]
+    [InlineData(2)]
+    [InlineData(5)]
+    [InlineData(8)]
+    [InlineData(10)]
+    public void Generate_creates_a_complete_layout_for_supported_pair_counts(int pairCount)
+    {
+        var layout = new ExactFitLayoutGenerator(new Random(42)).Generate(CreateBlocks(pairCount));
+
+        Assert.Equal(64, layout.CellCount);
+        Assert.Equal(pairCount * 2, layout.Tiles.Count);
+        Assert.Equal(64, layout.Tiles.SelectMany(tile => tile.TargetCells).Distinct().Count());
+        Assert.All(layout.Tiles.SelectMany(tile => tile.TargetCells), cell =>
+        {
+            Assert.InRange(cell.Row, 0, PuzzleEngine.BoardSize - 1);
+            Assert.InRange(cell.Column, 0, PuzzleEngine.BoardSize - 1);
+        });
+
+        foreach (var pair in layout.Tiles.GroupBy(tile => tile.PairId))
+        {
+            Assert.Equal(2, pair.Count());
+            Assert.Single(pair, tile => tile.Kind == PuzzleTileKind.Question);
+            Assert.Single(pair, tile => tile.Kind == PuzzleTileKind.Answer);
+
+            var question = pair.Single(tile => tile.IsQuestion);
+            var answer = pair.Single(tile => !tile.IsQuestion);
+            Assert.True(ShareAnEdge(question.TargetCells, answer.TargetCells));
+        }
+    }
+
+    [Fact]
+    public void Engine_allows_free_placement_but_rejects_out_of_bounds_and_completes()
+    {
+        var blocks = CreateBlocks(5);
+        var engine = new PuzzleEngine(new ExactFitLayoutGenerator(new Random(7)));
+        engine.StartNewGame(blocks);
+
+        var first = engine.RemainingTiles[0];
+        var target = GetTopLeft(first.TargetCells);
+        Assert.False(engine.CanPlace(first, -1, target.Column));
+        Assert.True(engine.CanPlace(first, target.Row, target.Column));
+        Assert.Contains(
+            Enumerable.Range(0, PuzzleEngine.BoardSize)
+                .SelectMany(row => Enumerable.Range(0, PuzzleEngine.BoardSize).Select(column => (row, column)))
+                .Where(position => position != (target.Row, target.Column)),
+            position => engine.CanPlace(first, position.row, position.column));
+
+        foreach (var tile in engine.Layout.Tiles)
+        {
+            var tileTarget = GetTopLeft(tile.TargetCells);
+            Assert.True(engine.Place(tile, tileTarget.Row, tileTarget.Column).Success);
+        }
+
+        Assert.True(engine.IsComplete);
+        Assert.Empty(engine.RemainingTiles);
+    }
+
+    [Fact]
+    public void Engine_reports_a_match_when_pair_tiles_are_connected()
+    {
+        var engine = new PuzzleEngine(new ExactFitLayoutGenerator(new Random(12)));
+        engine.StartNewGame(CreateBlocks(5));
+
+        var pair = engine.Layout.Tiles.GroupBy(tile => tile.PairId).First();
+        var question = pair.Single(tile => tile.IsQuestion);
+        var answer = pair.Single(tile => !tile.IsQuestion);
+        var questionTarget = GetTopLeft(question.TargetCells);
+        var answerTarget = GetTopLeft(answer.TargetCells);
+
+        Assert.True(engine.Place(question, questionTarget.Row, questionTarget.Column).Success);
+        var result = engine.Place(answer, answerTarget.Row, answerTarget.Column);
+
+        Assert.True(result.Success);
+        Assert.True(result.PairConnected);
+        Assert.Contains(pair.Key, engine.ConnectedPairIds);
+    }
+
+    private static IReadOnlyList<GameBlock> CreateBlocks(int count)
+    {
+        return Enumerable.Range(0, count)
+            .Select(index => new GameBlock
+            {
+                Term = $"Term {index}",
+                Definition = $"Definition {index}"
+            })
+            .ToArray();
+    }
+
+    private static GridCell GetTopLeft(IReadOnlyList<GridCell> cells)
+    {
+        return new GridCell(cells.Min(cell => cell.Row), cells.Min(cell => cell.Column));
+    }
+
+    private static bool ShareAnEdge(IReadOnlyList<GridCell> first, IReadOnlyList<GridCell> second)
+    {
+        return first.Any(left => second.Any(right => Math.Abs(left.Row - right.Row) + Math.Abs(left.Column - right.Column) == 1));
+    }
+}
+
+</code>
+
+ViewModels\AnswerOptionViewModel.cs:
+<code>
+﻿using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+
+namespace SnapBlast.ViewModels;
+public partial class AnswerOptionViewModel : ObservableObject
+{
+    private static readonly Color Neutral = Color.FromArgb("#E8DFF5");
+    private static readonly Color Correct = Color.FromArgb("#C9EBDD");
+    private static readonly Color Wrong = Color.FromArgb("#F4B6B6");
+
+    private readonly Action<AnswerOptionViewModel> onSelected;
+
+    public AnswerOptionViewModel(char letter, string text, bool isCorrect, Action<AnswerOptionViewModel> onSelected)
+    {
+        DisplayText = $"{letter}.  {text}";
+        IsCorrect = isCorrect;
+        this.onSelected = onSelected;
+    }
+
+    public string DisplayText { get; }
+    public bool IsCorrect { get; }
+
+    [ObservableProperty]
+    private Color fillColor = Neutral;
+
+    [RelayCommand]
+    private void Select() => onSelected(this);
+
+    public void ShowCorrect() => FillColor = Correct;
+    public void ShowWrong() => FillColor = Wrong;
+}
+</code>
+
+ViewModels\GameModeSelectionViewModel.cs:
+<code>
+﻿using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using SnapBlast.Services;
+
+namespace SnapBlast.ViewModels;
+
+public partial class GameModeSelectionViewModel : ObservableObject
+{
+    private readonly QuizApiClient apiClient;
+
+    [ObservableProperty]
+    private string greeting = "Choose a game mode";
+
+    public GameModeSelectionViewModel(QuizApiClient apiClient)
+    {
+        this.apiClient = apiClient;
+        Refresh();
+    }
+
+    public void Refresh() =>
+        Greeting = string.IsNullOrWhiteSpace(apiClient.DisplayName)
+            ? "Choose a game mode"
+            : $"Welcome, {apiClient.DisplayName}";
+
+    // "//route" = absolute navigation to a ShellContent route declared in AppShell.xaml.
+    [RelayCommand]
+    private Task OpenBlockBlast() => Shell.Current.GoToAsync("//blockblast");
+
+    [RelayCommand]
+    private Task OpenMultipleChoice() => Shell.Current.GoToAsync("//multiplechoice");
+
+    [RelayCommand]
+    private async Task SignOut()
+    {
+        apiClient.SignOut();
+        await Shell.Current.GoToAsync("//login");
+    }
+}
+</code>
+
+ViewModels\LoginViewModel.cs:
+<code>
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using SnapBlast.Configuration;
+using SnapBlast.Services;
+
+namespace SnapBlast.ViewModels;
+
+public partial class LoginViewModel : ObservableObject
+{
+    private readonly QuizApiClient apiClient;
+
+    [ObservableProperty]
+    private string email = string.Empty;
+
+    [ObservableProperty]
+    private string password = string.Empty;
+
+    [ObservableProperty]
+    private string displayName = string.Empty;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SubmitText))]
+    private bool isRegisterMode;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsNotBusy))]
+    private bool isBusy;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasStatus))]
+    private string statusMessage = string.Empty;
+
+    // Computed properties the XAML binds to, so the page needs no value converters.
+    public string SubmitText => IsRegisterMode ? "Create account" : "Sign in";
+    public bool HasStatus => !string.IsNullOrWhiteSpace(StatusMessage);
+    public bool IsNotBusy => !IsBusy;
+
+    public LoginViewModel(QuizApiClient apiClient)
+    {
+        this.apiClient = apiClient;
+    }
+
+    [RelayCommand]
+    private void SwitchToLogin()
+    {
+        IsRegisterMode = false;
+        StatusMessage = string.Empty;
+    }
+
+    [RelayCommand]
+    private void SwitchToRegister()
+    {
+        IsRegisterMode = true;
+        StatusMessage = string.Empty;
+    }
+
+    [RelayCommand]
+    private async Task Authenticate()
+    {
+        if (IsBusy) return;
+
+        if (string.IsNullOrWhiteSpace(Email) || string.IsNullOrWhiteSpace(Password))
+        {
+            StatusMessage = "Email and password are required.";
+            return;
+        }
+
+        if (IsRegisterMode && string.IsNullOrWhiteSpace(DisplayName))
+        {
+            StatusMessage = "Display name is required for registration.";
+            return;
+        }
+
+        try
+        {
+            IsBusy = true;
+            StatusMessage = string.Empty;
+
+            await apiClient.AuthenticateAsync(Email.Trim(), Password, DisplayName.Trim(), IsRegisterMode, CancellationToken.None);
+
+            Password = string.Empty;
+            await Shell.Current.GoToAsync("//gamemode_selection");
+        }
+        catch (HttpRequestException exception)
+        {
+            StatusMessage = $"Could not reach the API at {ApiSettings.BaseUrl}. {exception.Message}";
+        }
+        catch (Exception exception)
+        {
+            StatusMessage = exception.Message;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+}
+
+</code>
+
+ViewModels\MainViewModel.cs:
+<code>
+using System.Collections.ObjectModel;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using SnapBlast.Game;
+using SnapBlast.Models;
+using SnapBlast.Services;
+
+namespace SnapBlast.ViewModels;
+
+public partial class MainViewModel : ObservableObject
+{
+    private Quiz quiz = new()
+    {
+        Title = "Networking basics",
+        Blocks =
+        [
+            new GameBlock { Term = "HTTP", Definition = "A protocol used to transfer web resources." },
+            new GameBlock { Term = "DNS", Definition = "Translates domain names into IP addresses." },
+            new GameBlock { Term = "IP address", Definition = "A numerical address that identifies a device on a network." },
+            new GameBlock { Term = "Firewall", Definition = "Filters network traffic according to security rules." },
+            new GameBlock { Term = "Router", Definition = "Forwards data packets between networks." }
+        ]
+    };
+
+    private readonly PuzzleEngine engine = new();
+    private readonly QuizApiClient apiClient;
+
+    public ObservableCollection<QuizEntryViewModel> QuizEntries { get; } =
+    [
+        new QuizEntryViewModel(),
+        new QuizEntryViewModel(),
+        new QuizEntryViewModel(),
+        new QuizEntryViewModel(),
+        new QuizEntryViewModel()
+    ];
+
+    [ObservableProperty]
+    private string title = string.Empty;
+
+    [ObservableProperty]
+    private string statusMessage = string.Empty;
+
+    [ObservableProperty]
+    private int score;
+
+    [ObservableProperty]
+    private int matchedPairs;
+
+    [ObservableProperty]
+    private int combo;
+
+    [ObservableProperty]
+    private string matchFeedback = string.Empty;
+
+    [ObservableProperty]
+    private string customQuizTitle = string.Empty;
+
+    [ObservableProperty]
+    private bool isEditorVisible;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsNotBusy))]
+    private bool isBusy;
+
+    [ObservableProperty]
+    private int selectedTileIndex = -1;
+
+    [ObservableProperty]
+    private int boardVersion;
+
+    public bool IsNotBusy => !IsBusy;
+
+    public MainViewModel(QuizApiClient apiClient)
+    {
+        this.apiClient = apiClient;
+        Title = quiz.Title;
+        Tiles = [];
+        CustomQuizTitle = quiz.Title;
+        for (var index = 0; index < QuizEntries.Count && index < quiz.Blocks.Count; index++)
+        {
+            QuizEntries[index].Term = quiz.Blocks[index].Term;
+            QuizEntries[index].Definition = quiz.Blocks[index].Definition;
+        }
+        StartNewGame();
+    }
+
+    public PuzzleEngine Engine => engine;
+    public ObservableCollection<PuzzleTile> Tiles { get; }
+
+    [RelayCommand]
+    private Task BackToMenu() => Shell.Current.GoToAsync("//gamemode_selection");
+
+    [RelayCommand]
+    private void ToggleQuizEditor() => IsEditorVisible = !IsEditorVisible;
+
+    [RelayCommand]
+    private async Task ImportQuizFromImage()
+    {
+        if (IsBusy) return;
+        try
+        {
+            var file = await StudyFilePicker.PickAsync();
+            if (file is null)
+            {
+                return;
+            }
+
+            await GenerateQuizFromDocument(file);
+        }
+        catch (Exception exception)
+        {
+            StatusMessage = $"Could not open the file picker: {exception.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private async Task CaptureQuizImage()
+    {
+        if (IsBusy) return;
+        try
+        {
+            var file = await StudyFilePicker.CaptureAsync();
+            if (file is null)
+            {
+                return;
+            }
+
+            await GenerateQuizFromDocument(file);
+        }
+        catch (PermissionException)
+        {
+            StatusMessage = "Camera permission was denied. Enable camera access in the device settings and try again.";
+        }
+        catch (FeatureNotSupportedException)
+        {
+            StatusMessage = "Camera capture is not available on this device. Use Import image or PDF instead.";
+        }
+        catch (Exception exception)
+        {
+            StatusMessage = $"Could not open the camera: {exception.Message}";
+        }
+    }
+
+    private async Task GenerateQuizFromDocument(FileResult file)
+    {
+        try
+        {
+            IsBusy = true;
+            StatusMessage = "Sending the document to Google AI for text extraction and quiz generation...";
+
+            // Title is null so the AI picks one from the document
+            // (CustomQuizTitle defaults to "Networking basics", which would be forced onto every quiz).
+            var generated = await apiClient.GenerateQuizAsync(file, null, CancellationToken.None);
+            if (generated is null || generated.Blocks.Count == 0)
+            {
+                StatusMessage = "The AI returned no quiz pairs. You can enter the pairs manually.";
+                IsEditorVisible = true;
+                return;
+            }
+
+            CustomQuizTitle = generated.Title;
+            QuizEntries.Clear();
+            foreach (var block in generated.Blocks.Take(32))
+            {
+                QuizEntries.Add(new QuizEntryViewModel
+                {
+                    Term = block.Term,
+                    Definition = block.Definition
+                });
+            }
+
+            StatusMessage = $"Generated {generated.Blocks.Count} quiz pairs. Review them before starting the game.";
+            IsEditorVisible = true;
+        }
+        catch (Exception exception)
+        {
+            StatusMessage = $"Quiz generation failed: {exception.Message}";
+            IsEditorVisible = true;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private void StartCustomQuiz()
+    {
+        var blocks = QuizEntries
+            .Select(entry => new GameBlock { Term = entry.Term.Trim(), Definition = entry.Definition.Trim() })
+            .Where(block => !string.IsNullOrWhiteSpace(block.Term) && !string.IsNullOrWhiteSpace(block.Definition))
+            .ToArray();
+
+        if (blocks.Length < 2)
+        {
+            StatusMessage = "Add at least two complete question and answer pairs.";
+            IsEditorVisible = true;
+            return;
+        }
+
+        quiz = new Quiz
+        {
+            Title = string.IsNullOrWhiteSpace(CustomQuizTitle) ? "Custom quiz" : CustomQuizTitle.Trim(),
+            Blocks = blocks
+        };
+        Title = quiz.Title;
+        StartNewGame();
+        IsEditorVisible = false;
+        StatusMessage = $"Custom quiz loaded with {blocks.Length} pairs. Drag to connect each match.";
+    }
+
+    [RelayCommand]
+    private void StartNewGame()
+    {
+        engine.StartNewGame(quiz.Blocks);
+        Score = 0;
+        MatchedPairs = 0;
+        Combo = 0;
+        MatchFeedback = string.Empty;
+        SelectedTileIndex = 0;
+        StatusMessage = "Drag each separate question or answer tile anywhere it fits.";
+        RefreshTiles();
+    }
+
+    [RelayCommand]
+    private void SelectTile(string? indexText)
+    {
+        if (!int.TryParse(indexText, out var index) || index < 0 || index >= Tiles.Count)
+        {
+            return;
+        }
+
+        SelectedTileIndex = index;
+        var tile = Tiles[index];
+        StatusMessage = tile.IsQuestion
+            ? "Question tile selected. Place it anywhere it fits, then connect its answer."
+            : "Answer tile selected. Place it next to its matching question.";
+        BoardVersion++;
+    }
+
+    [RelayCommand]
+    private void PlaceCell(string? cell)
+    {
+        if (SelectedTileIndex < 0 || SelectedTileIndex >= Tiles.Count || string.IsNullOrWhiteSpace(cell))
+        {
+            return;
+        }
+
+        var parts = cell.Split(',');
+        if (parts.Length == 2 && int.TryParse(parts[0], out var row) && int.TryParse(parts[1], out var column))
+        {
+            TryPlaceTile(Tiles[SelectedTileIndex], row, column);
+        }
+    }
+
+    public bool TryPlaceTile(PuzzleTile tile, int row, int column)
+    {
+        if (!Tiles.Contains(tile))
+        {
+            return false;
+        }
+
+        var result = engine.Place(tile, row, column);
+        if (!result.Success)
+        {
+            StatusMessage = "That tile does not fit there or would make the remaining puzzle unsolvable.";
+            BoardVersion++;
+            return false;
+        }
+
+        Score = result.Score;
+        if (result.PairConnected)
+        {
+            MatchedPairs = engine.ConnectedPairIds.Count;
+            Combo++;
+            MatchFeedback = Combo > 1 ? $"MATCHED • {Combo}× COMBO" : "MATCHED • PAIR CONNECTED";
+            StatusMessage = "Correct pair connection. The link is locked into the board.";
+        }
+        else if (result.TouchesWrongPair)
+        {
+            Combo = 0;
+            MatchFeedback = "NEAR MISS • WRONG NEIGHBOR";
+            StatusMessage = "The tile fits, but it is touching a different pair. Try connecting its matching tile nearby.";
+        }
+        else
+        {
+            Combo = 0;
+            MatchFeedback = "TILE PLACED";
+            StatusMessage = "Tile placed. Now connect its matching question or answer tile.";
+        }
+
+        RefreshTiles();
+        SelectedTileIndex = Tiles.Count > 0 ? 0 : -1;
+        if (engine.IsComplete)
+        {
+            StatusMessage = $"Complete! You matched all pairs and filled the 8×8 grid. Score: {Score}.";
+        }
+
+        BoardVersion++;
+        return true;
+    }
+
+    private void RefreshTiles()
+    {
+        Tiles.Clear();
+        foreach (var tile in engine.RemainingTiles)
+        {
+            Tiles.Add(tile);
+        }
+
+        BoardVersion++;
+    }
+}
+
+</code>
+
+ViewModels\MultipleChoiceViewModel.cs:
+<code>
+﻿using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using SnapBlast.Models;
+using SnapBlast.Services;
+using System.Collections.ObjectModel;
+
+namespace SnapBlast.ViewModels;
+
+public enum GameStage
+{
+    Setup,
+    Playing,
+    Finished
+}
+
+public partial class MultipleChoiceViewModel : ObservableObject
+{
+    private readonly QuizApiClient apiClient;
+    private List<MultipleChoiceQuestion> questions = [];
+    private int currentIndex;
+
+    public MultipleChoiceViewModel(QuizApiClient apiClient)
+    {
+        this.apiClient = apiClient;
+        StatusMessage = "Choose how to build your quiz.";
+    }
+
+    public ObservableCollection<AnswerOptionViewModel> Options { get; } = [];
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsSetupVisible))]
+    [NotifyPropertyChangedFor(nameof(IsPlayingVisible))]
+    [NotifyPropertyChangedFor(nameof(IsFinishedVisible))]
+    private GameStage stage = GameStage.Setup;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsNotBusy))]
+    private bool isBusy;
+
+    [ObservableProperty] private string statusMessage = string.Empty;
+    [ObservableProperty] private string quizTitle = string.Empty;
+    [ObservableProperty] private string questionText = string.Empty;
+    [ObservableProperty] private string progressText = string.Empty;
+    [ObservableProperty] private string feedbackText = string.Empty;
+    [ObservableProperty] private string nextButtonText = "Next question";
+    [ObservableProperty] private string resultText = string.Empty;
+    [ObservableProperty] private int score;
+    [ObservableProperty] private bool isAnswered;
+
+    public bool IsSetupVisible => Stage == GameStage.Setup;
+    public bool IsPlayingVisible => Stage == GameStage.Playing;
+    public bool IsFinishedVisible => Stage == GameStage.Finished;
+    public bool IsNotBusy => !IsBusy;
+
+    // ---------- Building a quiz ----------
+
+    [RelayCommand]
+    private void UseSampleQuiz()
+    {
+        BeginQuiz("Networking basics (sample)",
+        [
+            new("What is the purpose of DNS?", "Translates domain names into IP addresses",
+                ["Encrypts traffic between two devices", "Assigns IP addresses automatically to new devices", "Forwards data packets between networks"]),
+            new("Which device forwards data packets between networks?", "Router",
+                ["Firewall", "Repeater", "DNS server"]),
+            new("What does a firewall do?", "Filters network traffic according to security rules",
+                ["Translates domain names into IP addresses", "Stores web pages for faster loading", "Boosts the wireless signal"]),
+            new("HTTP is a protocol used to transfer what?", "Web resources such as pages and images",
+                ["Email attachments only", "Encrypted database backups", "Raw hardware drivers"])
+        ]);
+    }
+
+    [RelayCommand]
+    private async Task ImportDocument()
+    {
+        if (IsBusy) return;
+        try
+        {
+            var file = await StudyFilePicker.PickAsync();
+            if (file is null) return;
+            await GenerateFromFile(file);
+        }
+        catch (Exception exception)
+        {
+            StatusMessage = $"Could not open the file picker: {exception.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private async Task CaptureDocument()
+    {
+        if (IsBusy) return;
+        try
+        {
+            var file = await StudyFilePicker.CaptureAsync();
+            if (file is null) return;
+            await GenerateFromFile(file);
+        }
+        catch (PermissionException)
+        {
+            StatusMessage = "Camera permission was denied. Enable camera access in the device settings and try again.";
+        }
+        catch (FeatureNotSupportedException)
+        {
+            StatusMessage = "Camera capture is not available on this device. Use Import image or PDF instead.";
+        }
+        catch (Exception exception)
+        {
+            StatusMessage = $"Could not open the camera: {exception.Message}";
+        }
+    }
+
+    private async Task GenerateFromFile(FileResult file)
+    {
+        try
+        {
+            IsBusy = true;
+            StatusMessage = "Sending the document to Google AI for text extraction and question writing...";
+
+            var generated = await apiClient.GenerateMultipleChoiceAsync(file, null, CancellationToken.None);
+            if (generated is null || generated.Blocks.Count == 0)
+            {
+                StatusMessage = "The AI returned no questions. Try a clearer photo or a different document.";
+                return;
+            }
+
+            var built = new List<MultipleChoiceQuestion>();
+            foreach (var block in generated.Blocks)
+            {
+                var question = block.Term.Trim();
+                var answer = block.Definition.Trim();
+                if (question.Length == 0 || answer.Length == 0) continue;
+
+                var wrong = block.Distractors
+                    .Select(item => item.Trim())
+                    .Where(item => item.Length > 0 && !item.Equals(answer, StringComparison.OrdinalIgnoreCase))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Take(3)
+                    .ToList();
+
+                if (wrong.Count > 0)
+                {
+                    built.Add(new MultipleChoiceQuestion(question, answer, wrong));
+                }
+            }
+
+            if (built.Count == 0)
+            {
+                StatusMessage = "The AI response had no usable questions. Please try again.";
+                return;
+            }
+
+            BeginQuiz(string.IsNullOrWhiteSpace(generated.Title) ? "Generated quiz" : generated.Title, built);
+        }
+        catch (Exception exception)
+        {
+            StatusMessage = $"Quiz generation failed: {exception.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    // ---------- Playing ----------
+
+    private void BeginQuiz(string title, IEnumerable<MultipleChoiceQuestion> source)
+    {
+        questions = source.OrderBy(_ => Random.Shared.Next()).ToList();
+        QuizTitle = title;
+        Score = 0;
+        currentIndex = 0;
+        Stage = GameStage.Playing;
+        ShowQuestion();
+    }
+
+    private void ShowQuestion()
+    {
+        var question = questions[currentIndex];
+        QuestionText = question.Question;
+        ProgressText = $"{currentIndex + 1} of {questions.Count}";
+        NextButtonText = currentIndex + 1 >= questions.Count ? "See results" : "Next question";
+        FeedbackText = string.Empty;
+        IsAnswered = false;
+
+        var choices = question.WrongAnswers
+            .Select(text => (Text: text, IsCorrect: false))
+            .Append((Text: question.CorrectAnswer, IsCorrect: true))
+            .ToArray();
+        Random.Shared.Shuffle(choices);
+
+        Options.Clear();
+        for (var index = 0; index < choices.Length; index++)
+        {
+            Options.Add(new AnswerOptionViewModel((char)('A' + index), choices[index].Text, choices[index].IsCorrect, OnOptionSelected));
+        }
+    }
+
+    private void OnOptionSelected(AnswerOptionViewModel selected)
+    {
+        if (IsAnswered) return; // ignore extra taps once answered
+        IsAnswered = true;
+
+        foreach (var option in Options)
+        {
+            if (option.IsCorrect) option.ShowCorrect();
+            else if (ReferenceEquals(option, selected)) option.ShowWrong();
+        }
+
+        if (selected.IsCorrect)
+        {
+            Score++;
+            FeedbackText = "Correct!";
+        }
+        else
+        {
+            FeedbackText = $"Not quite. The correct answer is: {questions[currentIndex].CorrectAnswer}";
+        }
+    }
+
+    [RelayCommand]
+    private void NextQuestion()
+    {
+        if (!IsAnswered) return;
+
+        if (currentIndex + 1 >= questions.Count)
+        {
+            var percent = questions.Count == 0 ? 0 : Score * 100 / questions.Count;
+            ResultText = $"You got {Score} of {questions.Count} correct ({percent}%).";
+            Stage = GameStage.Finished;
+            return;
+        }
+
+        currentIndex++;
+        ShowQuestion();
+    }
+
+    [RelayCommand]
+    private void Restart() => BeginQuiz(QuizTitle, questions);
+
+    [RelayCommand]
+    private void NewQuiz()
+    {
+        StatusMessage = "Choose how to build your quiz.";
+        Stage = GameStage.Setup;
+    }
+
+    [RelayCommand]
+    private Task BackToMenu() => Shell.Current.GoToAsync("//gamemode_selection");
+}
+</code>
+
+ViewModels\QuizEntryViewModel.cs:
+<code>
+using CommunityToolkit.Mvvm.ComponentModel;
+
+namespace SnapBlast.ViewModels;
+
+public partial class QuizEntryViewModel : ObservableObject
+{
+    [ObservableProperty]
+    private string term = string.Empty;
+
+    [ObservableProperty]
+    private string definition = string.Empty;
+}
+</code>
+
+Views\GameModeSelectionPage.xaml.cs:
+<code>
+using SnapBlast.ViewModels;
+
+namespace SnapBlast.Views;
+
+public partial class GameModeSelectionPage : ContentPage
+{
+    private readonly GameModeSelectionViewModel viewModel;
+
+    public GameModeSelectionPage(GameModeSelectionViewModel viewModel)
+    {
+        InitializeComponent();
+        this.viewModel = viewModel;
+        BindingContext = viewModel;
+    }
+
+    protected override void OnAppearing()
+    {
+        base.OnAppearing();
+        // Shell keeps this page alive, so refresh the greeting every time it's shown.
+        viewModel.Refresh();
+    }
+}
+
+</code>
+
+Views\LoginPage.xaml.cs:
+<code>
+using SnapBlast.ViewModels;
+
+namespace SnapBlast.Views;
+
+public partial class LoginPage : ContentPage
+{
+    public LoginPage(LoginViewModel viewModel)
+    {
+        InitializeComponent();
+        BindingContext = viewModel;
+    }
+}
+
+</code>
+
+Views\MultipleChoiceGamePage.xaml.cs:
+<code>
+using SnapBlast.ViewModels;
+
+namespace SnapBlast.Views;
+
+public partial class MultipleChoiceGamePage : ContentPage
+{
+    public MultipleChoiceGamePage(MultipleChoiceViewModel viewModel)
+    {
+        InitializeComponent();
+        BindingContext = viewModel;
+    }
+}
+</code>
+
+Views\PuzzlePlayView.cs:
+<code>
+using SnapBlast.Game;
+using SnapBlast.Models;
+
+namespace SnapBlast.Views;
+
+public sealed class PuzzlePlayView : GraphicsView
+{
+    private PuzzleTile? draggingTile;
+    private int ghostRow = -1;
+    private int ghostColumn = -1;
+    private bool ghostIsValid;
+
+    public static readonly BindableProperty EngineProperty = BindableProperty.Create(
+        nameof(Engine), typeof(PuzzleEngine), typeof(PuzzlePlayView), propertyChanged: OnViewPropertyChanged);
+
+    public static readonly BindableProperty SelectedTileIndexProperty = BindableProperty.Create(
+        nameof(SelectedTileIndex), typeof(int), typeof(PuzzlePlayView), -1, propertyChanged: OnViewPropertyChanged);
+
+    public PuzzlePlayView()
+    {
+        Drawable = new ExactFitDrawable(this);
+        BackgroundColor = Colors.Transparent;
+        StartInteraction += OnStartInteraction;
+        DragInteraction += OnDragInteraction;
+        EndInteraction += OnEndInteraction;
+    }
+
+    public event EventHandler<TileDropEventArgs>? TileDropped;
+    public event EventHandler? TileDropRejected;
+
+    public PuzzleEngine? Engine
+    {
+        get => (PuzzleEngine?)GetValue(EngineProperty);
+        set => SetValue(EngineProperty, value);
+    }
+
+    public int SelectedTileIndex
+    {
+        get => (int)GetValue(SelectedTileIndexProperty);
+        set => SetValue(SelectedTileIndexProperty, value);
+    }
+
+    public void Refresh() => Invalidate();
+
+    private static void OnViewPropertyChanged(BindableObject bindable, object oldValue, object newValue)
+    {
+        ((PuzzlePlayView)bindable).Invalidate();
+    }
+
+    private void OnStartInteraction(object? sender, TouchEventArgs e)
+    {
+        var point = e.Touches.FirstOrDefault();
+        if (Engine is null || point == default)
+        {
+            return;
+        }
+
+        if (!TryGetTrayTile(point, out var trayTile))
+        {
+            trayTile = SelectedTileIndex >= 0 && SelectedTileIndex < Engine.RemainingTiles.Count && IsInBoard(point)
+                ? Engine.RemainingTiles[SelectedTileIndex]
+                : null;
+        }
+
+        if (trayTile is null)
+        {
+            return;
+        }
+
+        draggingTile = trayTile;
+        UpdateGhost(point);
+    }
+
+    private void OnDragInteraction(object? sender, TouchEventArgs e)
+    {
+        if (draggingTile is null)
+        {
+            return;
+        }
+
+        UpdateGhost(e.Touches.FirstOrDefault());
+    }
+
+    private void OnEndInteraction(object? sender, TouchEventArgs e)
+    {
+        if (draggingTile is null)
+        {
+            return;
+        }
+
+        if (ghostIsValid && Engine is not null)
+        {
+            TileDropped?.Invoke(this, new TileDropEventArgs(draggingTile, ghostRow, ghostColumn));
+        }
+        else
+        {
+            TileDropRejected?.Invoke(this, EventArgs.Empty);
+        }
+
+        draggingTile = null;
+        ghostRow = -1;
+        ghostColumn = -1;
+        ghostIsValid = false;
+        Invalidate();
+    }
+
+    private void UpdateGhost(PointF point)
+    {
+        ghostRow = -1;
+        ghostColumn = -1;
+        ghostIsValid = false;
+
+        if (draggingTile is not null && Engine is not null && TryGetBoardCell(point, out var row, out var column))
+        {
+            var bounds = GetBounds(draggingTile.TargetCells);
+            ghostRow = row - bounds.Height / 2;
+            ghostColumn = column - bounds.Width / 2;
+            ghostIsValid = Engine.CanPlace(draggingTile, ghostRow, ghostColumn);
+        }
+
+        Invalidate();
+    }
+
+    private bool TryGetTrayTile(PointF point, out PuzzleTile? tile)
+    {
+        tile = null;
+        if (Engine is null)
+        {
+            return false;
+        }
+
+        var tray = GetTrayLayout();
+        if (!tray.Bounds.Contains(point))
+        {
+            return false;
+        }
+
+        var column = Math.Clamp((int)((point.X - tray.Bounds.Left) / tray.CardWidth), 0, tray.Columns - 1);
+        var row = Math.Max(0, (int)((point.Y - tray.Bounds.Top) / tray.CardHeight));
+        var index = row * tray.Columns + column;
+        if (index >= Engine.RemainingTiles.Count)
+        {
+            return false;
+        }
+
+        tile = Engine.RemainingTiles[index];
+        return true;
+    }
+
+    private bool IsInBoard(PointF point) => GetBoardBounds().Contains(point);
+
+    private bool TryGetBoardCell(PointF point, out int row, out int column)
+    {
+        var board = GetBoardBounds();
+        var cellSize = board.Width / PuzzleEngine.BoardSize;
+        column = (int)((point.X - board.Left) / cellSize);
+        row = (int)((point.Y - board.Top) / cellSize);
+        return board.Contains(point) && row is >= 0 and < PuzzleEngine.BoardSize && column is >= 0 and < PuzzleEngine.BoardSize;
+    }
+
+    private RectF GetBoardBounds()
+    {
+        var viewWidth = (float)Width;
+        var size = MathF.Min(viewWidth - 12f, 350f);
+        return new RectF((viewWidth - size) / 2f, 8f, size, size);
+    }
+
+    private (RectF Bounds, float CardWidth, float CardHeight, int Columns) GetTrayLayout()
+    {
+        var board = GetBoardBounds();
+        const int columns = 3;
+        const float gap = 6f;
+        var cardWidth = ((float)Width - 16f - gap * (columns - 1)) / columns;
+        var cardHeight = 68f;
+        return (new RectF(8f, board.Bottom + 28f, (float)Width - 16f, (float)Height - board.Bottom - 28f), cardWidth + gap, cardHeight + gap, columns);
+    }
+
+    private static TileBounds GetBounds(IReadOnlyList<GridCell> cells)
+    {
+        var minRow = cells.Min(cell => cell.Row);
+        var minColumn = cells.Min(cell => cell.Column);
+        var maxRow = cells.Max(cell => cell.Row);
+        var maxColumn = cells.Max(cell => cell.Column);
+        return new TileBounds(minRow, minColumn, maxRow - minRow + 1, maxColumn - minColumn + 1);
+    }
+
+    private sealed class ExactFitDrawable(PuzzlePlayView owner) : IDrawable
+    {
+        public void Draw(ICanvas canvas, RectF dirtyRect)
+        {
+            var board = owner.GetBoardBounds();
+            var cellSize = board.Width / PuzzleEngine.BoardSize;
+            DrawBoard(canvas, board, cellSize);
+            DrawTray(canvas);
+        }
+
+        private void DrawBoard(ICanvas canvas, RectF board, float cellSize)
+        {
+            canvas.FillColor = Color.FromArgb("#E8DFF5");
+            canvas.FillRoundedRectangle(board.Left, board.Top, board.Width, board.Height, 18);
+
+            for (var row = 0; row < PuzzleEngine.BoardSize; row++)
+            {
+                for (var column = 0; column < PuzzleEngine.BoardSize; column++)
+                {
+                    var x = board.Left + column * cellSize + 2;
+                    var y = board.Top + row * cellSize + 2;
+                    canvas.FillColor = owner.Engine?.IsOccupied(row, column) == true
+                        ? Color.FromArgb("#FFFDFB")
+                        : Color.FromArgb("#D8CDE8");
+                    canvas.FillRoundedRectangle(x, y, cellSize - 4, cellSize - 4, 5);
+                }
+            }
+
+            if (owner.Engine is not null)
+            {
+                var drawn = new HashSet<string>();
+                foreach (var tile in owner.Engine.Layout.Tiles)
+                {
+                    var cells = owner.Engine.GetPlacedCells(tile);
+                    if (cells.Count == 0 || !drawn.Add(tile.Id))
+                    {
+                        continue;
+                    }
+
+                    DrawPlacedTile(canvas, tile, cells, board, cellSize);
+                }
+
+                DrawPairConnections(canvas, board, cellSize);
+            }
+
+            if (owner.draggingTile is not null && owner.ghostRow >= 0 && owner.ghostColumn >= 0)
+            {
+                DrawGhost(canvas, owner.draggingTile, board, cellSize);
+            }
+        }
+
+        private void DrawPairConnections(ICanvas canvas, RectF board, float cellSize)
+        {
+            if (owner.Engine is null)
+            {
+                return;
+            }
+
+            foreach (var pairId in owner.Engine.ConnectedPairIds)
+            {
+                var question = owner.Engine.Layout.Tiles.FirstOrDefault(tile => tile.PairId == pairId && tile.IsQuestion);
+                var answer = owner.Engine.Layout.Tiles.FirstOrDefault(tile => tile.PairId == pairId && !tile.IsQuestion);
+                if (question is null || answer is null)
+                {
+                    continue;
+                }
+
+                var questionCells = owner.Engine.GetPlacedCells(question);
+                var answerCells = owner.Engine.GetPlacedCells(answer);
+                if (questionCells.Count == 0 || answerCells.Count == 0)
+                {
+                    continue;
+                }
+
+                GridCell? adjacentQuestion = questionCells.FirstOrDefault(left => answerCells.Any(right => Math.Abs(left.Row - right.Row) + Math.Abs(left.Column - right.Column) == 1));
+                GridCell? adjacentAnswer = adjacentQuestion is { } questionCell
+                    ? answerCells.FirstOrDefault(right => Math.Abs(right.Row - questionCell.Row) + Math.Abs(right.Column - questionCell.Column) == 1)
+                    : null;
+                if (adjacentQuestion is null || adjacentAnswer is null)
+                {
+                    continue;
+                }
+
+                var start = CellCenter(board, cellSize, adjacentQuestion.Value);
+                var end = CellCenter(board, cellSize, adjacentAnswer.Value);
+                canvas.StrokeColor = Color.FromArgb("#E6B85C");
+                canvas.StrokeSize = Math.Max(3, cellSize / 9);
+                canvas.DrawLine(start.X, start.Y, end.X, end.Y);
+                canvas.FillColor = Color.FromArgb("#E6B85C");
+                canvas.FillCircle((start.X + end.X) / 2, (start.Y + end.Y) / 2, Math.Max(4, cellSize / 7));
+            }
+        }
+
+        private static PointF CellCenter(RectF board, float cellSize, GridCell cell) =>
+            new(board.Left + cell.Column * cellSize + cellSize / 2, board.Top + cell.Row * cellSize + cellSize / 2);
+
+        private static void DrawPlacedTile(ICanvas canvas, PuzzleTile tile, IReadOnlyList<GridCell> cells, RectF board, float cellSize)
+        {
+            var bounds = GetBounds(cells);
+            var x = board.Left + bounds.Column * cellSize + 2;
+            var y = board.Top + bounds.Row * cellSize + 2;
+            var width = bounds.Width * cellSize - 4;
+            var height = bounds.Height * cellSize - 4;
+            canvas.FillColor = tile.IsQuestion ? Color.FromArgb("#D9CDF7") : Color.FromArgb("#C9EBDD");
+            canvas.FillRoundedRectangle(x, y, width, height, 7);
+            canvas.StrokeColor = tile.IsQuestion ? Color.FromArgb("#9A82D4") : Color.FromArgb("#71B99D");
+            canvas.StrokeSize = 2;
+            canvas.DrawRoundedRectangle(x, y, width, height, 7);
+            DrawTileText(canvas, tile, x, y, width, height, Math.Max(7, Math.Min(14, cellSize / 3.5f)));
+        }
+
+        private void DrawGhost(ICanvas canvas, PuzzleTile tile, RectF board, float cellSize)
+        {
+            var bounds = GetBounds(tile.TargetCells);
+            var x = board.Left + owner.ghostColumn * cellSize + 2;
+            var y = board.Top + owner.ghostRow * cellSize + 2;
+            var width = bounds.Width * cellSize - 4;
+            var height = bounds.Height * cellSize - 4;
+            canvas.FillColor = owner.ghostIsValid ? Color.FromArgb("#80C7E4F5") : Color.FromArgb("#80F4B6B6");
+            canvas.FillRoundedRectangle(x, y, width, height, 7);
+        }
+
+        private void DrawTray(ICanvas canvas)
+        {
+            var tray = owner.GetTrayLayout();
+            canvas.FontColor = Color.FromArgb("#554A5B");
+            canvas.FontSize = 13;
+            canvas.DrawString("Match each separate question tile to its answer tile", 8, tray.Bounds.Top - 21, (float)owner.Width - 16f, 17, HorizontalAlignment.Center, VerticalAlignment.Center);
+
+            for (var index = 0; index < (owner.Engine?.RemainingTiles.Count ?? 0); index++)
+            {
+                var row = index / tray.Columns;
+                var column = index % tray.Columns;
+                var x = 8f + column * tray.CardWidth;
+                var y = tray.Bounds.Top + row * tray.CardHeight;
+                var tile = owner.Engine!.RemainingTiles[index];
+                canvas.FillColor = tile.IsQuestion ? Color.FromArgb("#D9CDF7") : Color.FromArgb("#C9EBDD");
+                canvas.FillRoundedRectangle(x, y, tray.CardWidth - 6, tray.CardHeight - 6, 10);
+                canvas.StrokeColor = tile.IsQuestion ? Color.FromArgb("#9A82D4") : Color.FromArgb("#71B99D");
+                canvas.StrokeSize = index == owner.SelectedTileIndex ? 4 : 2;
+                canvas.DrawRoundedRectangle(x, y, tray.CardWidth - 6, tray.CardHeight - 6, 10);
+                canvas.FontColor = Color.FromArgb("#554A5B");
+                canvas.FontSize = 9;
+                canvas.DrawString(tile.IsQuestion ? "?" : "✓", x + 5, y + 5, 15, 20, HorizontalAlignment.Center, VerticalAlignment.Center);
+                DrawShapePreview(canvas, tile, x + 5, y + 30, 34, 30);
+                canvas.FontSize = 10;
+                var text = tile.IsQuestion ? tile.Block.Term : tile.Block.Definition;
+                canvas.DrawString(Shorten(text), x + 44, y + 7, tray.CardWidth - 52, tray.CardHeight - 14, HorizontalAlignment.Center, VerticalAlignment.Center);
+            }
+        }
+
+        private static void DrawShapePreview(ICanvas canvas, PuzzleTile tile, float x, float y, float width, float height)
+        {
+            var bounds = GetBounds(tile.TargetCells);
+            var cellSize = MathF.Min(width / bounds.Width, height / bounds.Height);
+            canvas.FillColor = tile.IsQuestion ? Color.FromArgb("#7654D6") : Color.FromArgb("#329B61");
+            foreach (var cell in tile.TargetCells)
+            {
+                var cellX = x + (cell.Column - bounds.Column) * cellSize;
+                var cellY = y + (cell.Row - bounds.Row) * cellSize;
+                canvas.FillRoundedRectangle(cellX, cellY, cellSize - 1, cellSize - 1, 2);
+            }
+        }
+
+        private static void DrawTileText(ICanvas canvas, PuzzleTile tile, float x, float y, float width, float height, float fontSize)
+        {
+            canvas.FontColor = Color.FromArgb("#172033");
+            canvas.FontSize = fontSize;
+            canvas.DrawString(tile.IsQuestion ? "?" : "✓", x + 4, y + 3, 18, 20, HorizontalAlignment.Center, VerticalAlignment.Center);
+            canvas.DrawString(Shorten(tile.IsQuestion ? tile.Block.Term : tile.Block.Definition), x + 4, y + 20, width - 8, height - 24, HorizontalAlignment.Center, VerticalAlignment.Center);
+        }
+
+        private static string Shorten(string value) => value.Length > 90 ? $"{value[..87]}..." : value;
+    }
+
+    private readonly record struct TileBounds(int Row, int Column, int Height, int Width);
+}
+
+public sealed class TileDropEventArgs(PuzzleTile tile, int row, int column) : EventArgs
+{
+    public PuzzleTile Tile { get; } = tile;
+    public int Row { get; } = row;
+    public int Column { get; } = column;
+}
+
+</code>
+

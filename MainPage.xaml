@@ -7,7 +7,13 @@
              BackgroundColor="{StaticResource MacaronBackground}">
     <ScrollView>
         <VerticalStackLayout Padding="20,18" Spacing="14">
-            <Label Text="SNAPBLAST" FontSize="14" CharacterSpacing="3" TextColor="{StaticResource Primary}" />
+            <Grid ColumnDefinitions="*,Auto">
+                <Label Text="SNAPBLAST" FontSize="14" CharacterSpacing="3" TextColor="{StaticResource Primary}" VerticalOptions="Center" />
+                <Button Grid.Column="1" Text="Menu"
+                        Command="{Binding BackToMenuCommand}"
+                        BackgroundColor="{StaticResource MacaronPeach}"
+                        TextColor="{StaticResource MacaronInk}" />
+            </Grid>
             <Label Text="{Binding Title}" Style="{StaticResource Headline}" />
             <Grid ColumnDefinitions="*,*,*" ColumnSpacing="8">
                 <Border Grid.Column="0" Padding="12" StrokeShape="RoundRectangle 12" BackgroundColor="{StaticResource Primary}">
@@ -33,25 +39,14 @@
                 <Label Text="{Binding MatchFeedback}" FontAttributes="Bold" TextColor="#815B00" />
             </Border>
             <Label Text="{Binding StatusMessage}" TextColor="#4B5563" LineBreakMode="WordWrap" />
-            <Border Padding="14" StrokeShape="RoundRectangle 16" BackgroundColor="{StaticResource MacaronMint}">
-                <VerticalStackLayout Spacing="8">
-                    <Label Text="ACCOUNT" FontAttributes="Bold" TextColor="{StaticResource MacaronInk}" />
-                    <Entry Text="{Binding Email}" Placeholder="Email" Keyboard="Email" />
-                    <Entry Text="{Binding DisplayName}" Placeholder="Display name (for registration)" IsVisible="{Binding IsEditorVisible}" />
-                    <Entry Text="{Binding Password}" Placeholder="Password" IsPassword="True" />
-                    <HorizontalStackLayout Spacing="8">
-                        <Button Text="Sign in" Command="{Binding LoginCommand}" />
-                        <Button Text="Register" Command="{Binding RegisterCommand}" BackgroundColor="{StaticResource MacaronPink}" TextColor="{StaticResource MacaronInk}" />
-                        <Button Text="Sign out" Command="{Binding SignOutCommand}" BackgroundColor="{StaticResource MacaronPeach}" TextColor="{StaticResource MacaronInk}" />
-                    </HorizontalStackLayout>
-                    <Label Text="{Binding SignedInAs, StringFormat='Signed in as {0}'}" TextColor="{StaticResource MacaronInk}" />
-                </VerticalStackLayout>
-            </Border>
-            <HorizontalStackLayout Spacing="10">
-                <Button Text="Create custom quiz" Command="{Binding ToggleQuizEditorCommand}" />
-                <Button Text="Open camera" Command="{Binding CaptureQuizImageCommand}" BackgroundColor="{StaticResource MacaronPink}" TextColor="{StaticResource MacaronInk}" />
-                <Button Text="Import study image" Command="{Binding ImportQuizFromImageCommand}" BackgroundColor="{StaticResource MacaronBlue}" TextColor="{StaticResource MacaronInk}" />
-            </HorizontalStackLayout>
+            <ActivityIndicator IsRunning="{Binding IsBusy}" IsVisible="{Binding IsBusy}" Color="{StaticResource Primary}" />
+
+            <!-- The old ACCOUNT block is gone: sign-in now happens on the Login page. -->
+            <FlexLayout Wrap="Wrap">
+                <Button Text="Create custom quiz" Command="{Binding ToggleQuizEditorCommand}" Margin="0,0,8,8" />
+                <Button Text="Open camera" Command="{Binding CaptureQuizImageCommand}" IsEnabled="{Binding IsNotBusy}" BackgroundColor="{StaticResource MacaronPink}" TextColor="{StaticResource MacaronInk}" Margin="0,0,8,8" />
+                <Button Text="Import image or PDF" Command="{Binding ImportQuizFromImageCommand}" IsEnabled="{Binding IsNotBusy}" BackgroundColor="{StaticResource MacaronBlue}" TextColor="{StaticResource MacaronInk}" Margin="0,0,8,8" />
+            </FlexLayout>
             <Border IsVisible="{Binding IsEditorVisible}" Padding="14" StrokeShape="RoundRectangle 16" BackgroundColor="{StaticResource MacaronLavender}">
                 <VerticalStackLayout Spacing="10">
                     <Label Text="CUSTOM QUIZ" FontAttributes="Bold" TextColor="{StaticResource MacaronInk}" />
@@ -68,7 +63,7 @@
                         </BindableLayout.ItemTemplate>
                     </VerticalStackLayout>
                     <Button Text="Start custom quiz" Command="{Binding StartCustomQuizCommand}" />
-                    <Label Text="Sign in before using camera or image generation. Generated pairs are shown here for review before the game starts." FontSize="11" TextColor="{StaticResource MacaronInk}" />
+                    <Label Text="Generated pairs are shown here for review before the game starts." FontSize="11" TextColor="{StaticResource MacaronInk}" />
                 </VerticalStackLayout>
             </Border>
             <views:PuzzlePlayView x:Name="PlayView" HeightRequest="720" />

@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="SnapBlast.Views.MultipleChoiceGamePage"
+             Title="Multiple Choice"
+             BackgroundColor="{StaticResource MacaronBackground}">
+    <ScrollView>
+        <VerticalStackLayout Padding="20,18" Spacing="14">
+
+            <Grid ColumnDefinitions="*,Auto">
+                <Label Text="MULTIPLE CHOICE" FontSize="14" CharacterSpacing="3" TextColor="{StaticResource Primary}" VerticalOptions="Center" />
+                <Button Grid.Column="1" Text="Menu"
+                        Command="{Binding BackToMenuCommand}"
+                        BackgroundColor="{StaticResource MacaronPeach}"
+                        TextColor="{StaticResource MacaronInk}" />
+            </Grid>
+
+            <!-- ============ SETUP: create a quiz ============ -->
+            <VerticalStackLayout IsVisible="{Binding IsSetupVisible}" Spacing="14">
+                <Label Text="Build a quiz from your notes" Style="{StaticResource Headline}" />
+                <Label Text="Take a photo or import an image or PDF of your study material. Google AI extracts the text and writes multiple-choice questions for you."
+                       TextColor="#4B5563"
+                       LineBreakMode="WordWrap" />
+
+                <FlexLayout Wrap="Wrap">
+                    <Button Text="Open camera"
+                            Command="{Binding CaptureDocumentCommand}"
+                            IsEnabled="{Binding IsNotBusy}"
+                            BackgroundColor="{StaticResource MacaronPink}"
+                            TextColor="{StaticResource MacaronInk}"
+                            Margin="0,0,8,8" />
+                    <Button Text="Import image or PDF"
+                            Command="{Binding ImportDocumentCommand}"
+                            IsEnabled="{Binding IsNotBusy}"
+                            BackgroundColor="{StaticResource MacaronBlue}"
+                            TextColor="{StaticResource MacaronInk}"
+                            Margin="0,0,8,8" />
+                    <Button Text="Try a sample quiz"
+                            Command="{Binding UseSampleQuizCommand}"
+                            IsEnabled="{Binding IsNotBusy}"
+                            BackgroundColor="{StaticResource MacaronButter}"
+                            TextColor="{StaticResource MacaronInk}"
+                            Margin="0,0,8,8" />
+                </FlexLayout>
+
+                <ActivityIndicator IsRunning="{Binding IsBusy}" IsVisible="{Binding IsBusy}" Color="{StaticResource Primary}" />
+                <Label Text="{Binding StatusMessage}" TextColor="#4B5563" LineBreakMode="WordWrap" />
+            </VerticalStackLayout>
+
+            <!-- ============ PLAYING ============ -->
+            <VerticalStackLayout IsVisible="{Binding IsPlayingVisible}" Spacing="14">
+                <Label Text="{Binding QuizTitle}" Style="{StaticResource Headline}" />
+
+                <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
+                    <Border Grid.Column="0" Padding="12" StrokeShape="RoundRectangle 12" BackgroundColor="{StaticResource MacaronButter}" Stroke="Transparent">
+                        <VerticalStackLayout>
+                            <Label Text="PROGRESS" FontSize="11" TextColor="#815B00" />
+                            <Label Text="{Binding ProgressText}" FontSize="16" FontAttributes="Bold" TextColor="#815B00" />
+                        </VerticalStackLayout>
+                    </Border>
+                    <Border Grid.Column="1" Padding="12" StrokeShape="RoundRectangle 12" BackgroundColor="{StaticResource Primary}" Stroke="Transparent">
+                        <VerticalStackLayout>
+                            <Label Text="SCORE" FontSize="11" TextColor="White" />
+                            <Label Text="{Binding Score}" FontSize="25" FontAttributes="Bold" TextColor="White" />
+                        </VerticalStackLayout>
+                    </Border>
+                </Grid>
+
+                <Border Padding="16" StrokeShape="RoundRectangle 16" BackgroundColor="{StaticResource MacaronLavender}" Stroke="Transparent">
+                    <Label Text="{Binding QuestionText}" FontSize="18" FontAttributes="Bold" TextColor="{StaticResource MacaronInk}" LineBreakMode="WordWrap" />
+                </Border>
+
+                <!-- Each option is its own view model with its own SelectCommand and FillColor -->
+                <VerticalStackLayout BindableLayout.ItemsSource="{Binding Options}" Spacing="10">
+                    <BindableLayout.ItemTemplate>
+                        <DataTemplate>
+                            <Border Padding="14,12" StrokeShape="RoundRectangle 14" Stroke="#9A82D4" StrokeThickness="2" BackgroundColor="{Binding FillColor}">
+                                <Border.GestureRecognizers>
+                                    <TapGestureRecognizer Command="{Binding SelectCommand}" />
+                                </Border.GestureRecognizers>
+                                <Label Text="{Binding DisplayText}" FontSize="16" TextColor="#172033" LineBreakMode="WordWrap" />
+                            </Border>
+                        </DataTemplate>
+                    </BindableLayout.ItemTemplate>
+                </VerticalStackLayout>
+
+                <Label Text="{Binding FeedbackText}" FontAttributes="Bold" FontSize="15" TextColor="{StaticResource MacaronInk}" LineBreakMode="WordWrap" IsVisible="{Binding IsAnswered}" />
+                <Button Text="{Binding NextButtonText}"
+                        Command="{Binding NextQuestionCommand}"
+                        IsVisible="{Binding IsAnswered}"
+                        BackgroundColor="{StaticResource Primary}"
+                        TextColor="White"
+                        FontAttributes="Bold"
+                        HorizontalOptions="Start" />
+            </VerticalStackLayout>
+
+            <!-- ============ FINISHED ============ -->
+            <VerticalStackLayout IsVisible="{Binding IsFinishedVisible}" Spacing="14">
+                <Label Text="Quiz complete!" Style="{StaticResource Headline}" />
+                <Border Padding="18" StrokeShape="RoundRectangle 16" BackgroundColor="{StaticResource MacaronMint}" Stroke="Transparent">
+                    <Label Text="{Binding ResultText}" FontSize="20" FontAttributes="Bold" TextColor="#245B42" LineBreakMode="WordWrap" />
+                </Border>
+                <FlexLayout Wrap="Wrap">
+                    <Button Text="Play again"
+                            Command="{Binding RestartCommand}"
+                            BackgroundColor="{StaticResource Primary}"
+                            TextColor="White"
+                            Margin="0,0,8,8" />
+                    <Button Text="New quiz"
+                            Command="{Binding NewQuizCommand}"
+                            BackgroundColor="{StaticResource MacaronBlue}"
+                            TextColor="{StaticResource MacaronInk}"
+                            Margin="0,0,8,8" />
+                </FlexLayout>
+            </VerticalStackLayout>
+
+        </VerticalStackLayout>
+    </ScrollView>
+</ContentPage>  

@@ -1,12 +1,13 @@
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using SnapBlast.Configuration;
 using SnapBlast.Services;
 
 namespace SnapBlast.ViewModels;
 
 public partial class LoginViewModel : ObservableObject
 {
-    private readonly QuizApiClient _apiClient;
+    private readonly QuizApiClient apiClient;
 
     [ObservableProperty]
     private string email = string.Empty;
@@ -18,36 +19,46 @@ public partial class LoginViewModel : ObservableObject
     private string displayName = string.Empty;
 
     [ObservableProperty]
-    private bool isRegisterMode = false;
+    [NotifyPropertyChangedFor(nameof(SubmitText))]
+    private bool isRegisterMode;
 
     [ObservableProperty]
-    private bool isBusy = false;
+    [NotifyPropertyChangedFor(nameof(IsNotBusy))]
+    private bool isBusy;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasStatus))]
     private string statusMessage = string.Empty;
+
+    // Computed properties the XAML binds to, so the page needs no value converters.
+    public string SubmitText => IsRegisterMode ? "Create account" : "Sign in";
+    public bool HasStatus => !string.IsNullOrWhiteSpace(StatusMessage);
+    public bool IsNotBusy => !IsBusy;
 
     public LoginViewModel(QuizApiClient apiClient)
     {
-        _apiClient = apiClient;
+        this.apiClient = apiClient;
     }
 
     [RelayCommand]
-    public void SwitchToLogin()
+    private void SwitchToLogin()
     {
         IsRegisterMode = false;
         StatusMessage = string.Empty;
     }
 
     [RelayCommand]
-    public void SwitchToRegister()
+    private void SwitchToRegister()
     {
         IsRegisterMode = true;
         StatusMessage = string.Empty;
     }
 
     [RelayCommand]
-    public async Task Authenticate()
+    private async Task Authenticate()
     {
+        if (IsBusy) return;
+
         if (string.IsNullOrWhiteSpace(Email) || string.IsNullOrWhiteSpace(Password))
         {
             StatusMessage = "Email and password are required.";
@@ -60,30 +71,23 @@ public partial class LoginViewModel : ObservableObject
             return;
         }
 
-        IsBusy = true;
-        StatusMessage = string.Empty;
-
         try
         {
-            var result = await _apiClient.AuthenticateAsync(
-                email: Email,
-                password: Password,
-                displayName: DisplayName,
-                isRegister: IsRegisterMode);
+            IsBusy = true;
+            StatusMessage = string.Empty;
 
-            if (result.Success)
-            {
-                // Navigate to game mode selection
-                await Shell.Current.GoToAsync("//gamemode_selection");
-            }
-            else
-            {
-                StatusMessage = result.Message ?? "Authentication failed.";
-            }
+            await apiClient.AuthenticateAsync(Email.Trim(), Password, DisplayName.Trim(), IsRegisterMode, CancellationToken.None);
+
+            Password = string.Empty;
+            await Shell.Current.GoToAsync("//gamemode_selection");
         }
-        catch (Exception ex)
+        catch (HttpRequestException exception)
         {
-            StatusMessage = $"Error: {ex.Message}";
+            StatusMessage = $"Could not reach the API at {ApiSettings.BaseUrl}. {exception.Message}";
+        }
+        catch (Exception exception)
+        {
+            StatusMessage = exception.Message;
         }
         finally
         {
